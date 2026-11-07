@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+components/plotly_view/plotly.min.js
+.venv/

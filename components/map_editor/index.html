@@ -1,0 +1,544 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GeoModel map editor</title>
+<style>
+:root{--navy:#051C2C;--blue:#2251FF;--cyan:#00A9F4;--ink:#1F2A37;--mute:#6B7A8C;--line:#D5DEE9;--bg:#F5F8FC;--red:#D7263D}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font:12.5px/1.35 Arial,Helvetica,sans-serif;color:var(--ink);background:#fff;overflow:hidden}
+#app{display:flex;height:100%;border:1px solid var(--line)}
+#left{flex:1;display:flex;flex-direction:column;min-width:0}
+#bar{display:flex;gap:6px;align-items:center;padding:6px 8px;background:var(--navy);color:#fff;flex-wrap:wrap}
+#bar .ttl{font-family:Georgia,serif;font-size:14px;margin-right:8px;letter-spacing:.2px}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;color:var(--ink);padding:4px 9px;border-radius:2px}
+button:hover{border-color:var(--blue);color:var(--blue)}
+#bar button{background:transparent;color:#fff;border-color:#34506b}
+#bar button:hover{background:#0b3350;border-color:var(--cyan);color:#fff}
+#bar button.on{background:var(--blue);border-color:var(--blue);color:#fff}
+button.primary{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:bold}
+button.primary:hover{background:#1a40cc;color:#fff}
+button.danger:hover{border-color:var(--red);color:var(--red)}
+#wrap{position:relative;flex:1;background:#EEF3F9;min-height:0}
+canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+#status{padding:3px 8px;background:var(--bg);border-top:1px solid var(--line);color:var(--mute);font-size:11.5px;display:flex;justify-content:space-between;gap:10px}
+#panel{width:290px;border-left:1px solid var(--line);background:var(--bg);overflow:auto;padding:8px 10px}
+#panel h4{margin:10px 0 4px;font:bold 11px Arial;letter-spacing:.8px;text-transform:uppercase;color:var(--blue)}
+#panel h4:first-child{margin-top:2px}
+label{display:block;color:var(--mute);font-size:11px;margin-top:5px}
+input[type=text],input[type=number],select{width:100%;padding:3px 5px;border:1px solid var(--line);border-radius:2px;font:inherit;background:#fff}
+.row{display:flex;gap:5px;align-items:center}.row>*{flex:1}
+.cal{display:grid;grid-template-columns:44px 1fr 1fr;gap:4px;margin-top:4px;align-items:center}
+.cal span{font-size:11px;color:var(--mute)}
+.list{max-height:150px;overflow:auto;border:1px solid var(--line);background:#fff}
+.list div{padding:3px 6px;border-bottom:1px solid #eef2f7;cursor:pointer;display:flex;justify-content:space-between}
+.list div.sel{background:#E3EBFF;font-weight:bold}
+.msg{margin-top:6px;padding:5px 7px;border-left:3px solid var(--cyan);background:#fff;color:var(--ink);font-size:11.5px}
+.msg.err{border-color:var(--red);color:var(--red)}
+.hint{color:var(--mute);font-size:11px;margin-top:4px}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="left">
+    <div id="bar"></div>
+    <div id="wrap"><canvas id="cv"></canvas></div>
+    <div id="status"><span id="coord">-</span><span id="help"></span></div>
+  </div>
+  <div id="panel"></div>
+</div>
+<script>
+"use strict";
+/* ---------- Streamlit component protocol (no build step) ---------- */
+function sl(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, data||{}), "*"); }
+function setValue(v){ sl("streamlit:setComponentValue", {value:v, dataType:"json"}); }
+function setHeight(h){ sl("streamlit:setFrameHeight", {height:h}); }
+
+/* ---------- state ---------- */
+const S = {
+  key:null, args:null, mode:"digitize", tool:"line",
+  view:{s:1, vx:0, vy:0, yDown:false}, W:300, H:300,
+  img:null, imgName:"",
+  contours:[], active:-1, points:[], traces:[], activeTrace:-1,
+  calib:[0,1,2,3].map(()=>({px:null,py:null,X:"",Y:""})), calibPick:-1,
+  zVal:2000, zStep:0, showBoundary:true,
+  faults:[], sel:-1, newFault:null, drag:null,
+  polys:[], psel:-1, newPoly:null, pdrag:null, boundary:"",
+  grid:null, gridCv:null, iso:[], extent:null, wells:[], nonce:0, defaults:{}, msg:"", msgErr:false,
+  mouse:null, pan:null, spaceDown:false
+};
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+const COLORS = ["#D7263D","#F46036","#2E294E","#1B998B","#6A4C93","#1982C4","#C5A100"];
+const RAMP = ["#E6F3FD","#8EC5EE","#3C86DB","#1D4FB0","#0B2A6B","#051C2C"];
+
+function hex2rgb(h){ return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)]; }
+function ramp(t){
+  t = Math.max(0, Math.min(1, t)); const n = RAMP.length-1, f = t*n, i = Math.min(Math.floor(f), n-1), u = f-i;
+  const a = hex2rgb(RAMP[i]), b = hex2rgb(RAMP[i+1]);
+  return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u, a[2]+(b[2]-a[2])*u];
+}
+function rgb(c){ return "rgb("+Math.round(c[0])+","+Math.round(c[1])+","+Math.round(c[2])+")"; }
+
+/* ---------- view transform ---------- */
+function w2s(x,y){ const v=S.view; return [(x-v.vx)*v.s, v.yDown ? (y-v.vy)*v.s : S.H-(y-v.vy)*v.s]; }
+function s2w(sx,sy){ const v=S.view; return [sx/v.s+v.vx, v.yDown ? sy/v.s+v.vy : (S.H-sy)/v.s+v.vy]; }
+function bbox(){
+  if (S.mode==="digitize" && S.img) return [0,S.img.width,0,S.img.height];
+  if (S.extent) return S.extent;
+  if (S.grid){ const g=S.grid; return [g.x0,g.x0+(g.ncol-1)*g.dx,g.y0,g.y0+(g.nrow-1)*g.dy]; }
+  return [0,1000,0,1000];
+}
+function fitView(){
+  const b = bbox(), pad = 0.04, w=b[1]-b[0], h=b[3]-b[2];
+  const s = Math.min(S.W/(w*(1+2*pad)), S.H/(h*(1+2*pad)));
+  S.view.s = s; S.view.yDown = (S.mode==="digitize" && !!S.img);
+  S.view.vx = b[0]-(S.W/s-w)/2;
+  S.view.vy = S.view.yDown ? b[2]-(S.H/s-h)/2 : b[2]-(S.H/s-h)/2;
+  draw();
+}
+function resize(){
+  const r = document.getElementById("wrap").getBoundingClientRect();
+  const dpr = window.devicePixelRatio||1;
+  S.W = Math.max(50,r.width); S.H = Math.max(50,r.height);
+  cv.width = S.W*dpr; cv.height = S.H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+/* ---------- calibration (pixel -> world) ---------- */
+function calibPoints(){
+  return S.calib.filter(c=>c.px!==null && isFinite(parseFloat(c.X)) && isFinite(parseFloat(c.Y)))
+                .map(c=>({px:c.px,py:c.py,X:parseFloat(c.X),Y:parseFloat(c.Y)}));
+}
+function solve3(A,b){ // 3x3 normal equations
+  const M=A.map((r,i)=>r.concat([b[i]]));
+  for(let i=0;i<3;i++){ let p=i; for(let r=i+1;r<3;r++) if(Math.abs(M[r][i])>Math.abs(M[p][i])) p=r;
+    if(Math.abs(M[p][i])<1e-12) return null; [M[i],M[p]]=[M[p],M[i]];
+    for(let r=0;r<3;r++) if(r!==i){ const f=M[r][i]/M[i][i]; for(let c=i;c<4;c++) M[r][c]-=f*M[i][c]; } }
+  return [M[0][3]/M[0][0],M[1][3]/M[1][1],M[2][3]/M[2][2]];
+}
+function affine(){
+  const P = calibPoints(); if (P.length<2) return null;
+  if (P.length===2){
+    const dx=P[1].px-P[0].px, dy=P[1].py-P[0].py; if(Math.abs(dx)<1e-9||Math.abs(dy)<1e-9) return null;
+    const sx=(P[1].X-P[0].X)/dx, sy=(P[1].Y-P[0].Y)/dy;
+    return {a:sx,b:0,c:P[0].X-sx*P[0].px, d:0,e:sy,f:P[0].Y-sy*P[0].py, kind:"2-point (axis-aligned)"};
+  }
+  const AtA=[[0,0,0],[0,0,0],[0,0,0]], bx=[0,0,0], by=[0,0,0];
+  P.forEach(p=>{ const r=[p.px,p.py,1]; for(let i=0;i<3;i++){ for(let j=0;j<3;j++) AtA[i][j]+=r[i]*r[j]; bx[i]+=r[i]*p.X; by[i]+=r[i]*p.Y; } });
+  const cx=solve3(AtA,bx), cy=solve3(AtA,by); if(!cx||!cy) return null;
+  return {a:cx[0],b:cx[1],c:cx[2],d:cy[0],e:cy[1],f:cy[2], kind:P.length+"-point affine"};
+}
+function calibRMS(T){ const P=calibPoints(); if(!T||!P.length) return null;
+  let s=0; P.forEach(p=>{ const w=applyT(T,p.px,p.py); s+=Math.pow(w[0]-p.X,2)+Math.pow(w[1]-p.Y,2); }); return Math.sqrt(s/P.length); }
+function applyT(T,x,y){ return [T.a*x+T.b*y+T.c, T.d*x+T.e*y+T.f]; }
+function toWorld(){ // function M -> world used when exporting
+  if (S.mode==="digitize" && S.img){ const T=affine(); if(!T) return null; return (x,y)=>applyT(T,x,y); }
+  return (x,y)=>[x,y];
+}
+
+function boundaryPoints(){
+  const p=S.polys.find(p=>p.name===S.boundary);
+  if(!p || !S.showBoundary) return [];
+  if(!S.img) return p.pts;
+  const T=affine();
+  if(!T) return [];
+  const det=T.a*T.e-T.b*T.d;
+  if(Math.abs(det)<1e-12) return [];
+  return p.pts.map(p=>{ const x=p[0]-T.c,y=p[1]-T.f; return [(T.e*x-T.b*y)/det,(T.a*y-T.d*x)/det]; });
+}
+
+/* ---------- drawing ---------- */
+function niceStep(range){ const raw=range/6, p=Math.pow(10,Math.floor(Math.log10(raw))), f=raw/p; return (f<1.5?1:f<3.5?2:f<7.5?5:10)*p; }
+function drawGraticule(){
+  const a=s2w(0,S.H), b=s2w(S.W,0), st=niceStep(Math.abs(b[0]-a[0]));
+  ctx.strokeStyle="#D5DEE9"; ctx.lineWidth=1; ctx.fillStyle="#6B7A8C"; ctx.font="10px Arial"; ctx.beginPath();
+  for(let x=Math.ceil(a[0]/st)*st; x<=b[0]; x+=st){ const p=w2s(x,0)[0]; ctx.moveTo(p,0); ctx.lineTo(p,S.H); }
+  for(let y=Math.ceil(a[1]/st)*st; y<=b[1]; y+=st){ const p=w2s(0,y)[1]; ctx.moveTo(0,p); ctx.lineTo(S.W,p); }
+  ctx.stroke();
+  for(let x=Math.ceil(a[0]/st)*st; x<=b[0]; x+=st) ctx.fillText(x.toFixed(0), w2s(x,0)[0]+2, S.H-3);
+  for(let y=Math.ceil(a[1]/st)*st; y<=b[1]; y+=st) ctx.fillText(y.toFixed(0), 3, w2s(0,y)[1]-2);
+}
+function zRange(){ let lo=Infinity,hi=-Infinity; S.contours.forEach(c=>{lo=Math.min(lo,c.z);hi=Math.max(hi,c.z);}); S.points.forEach(p=>{lo=Math.min(lo,p[2]);hi=Math.max(hi,p[2]);});
+  if(!isFinite(lo)) return [0,1]; if(hi-lo<1e-9) return [lo-1,hi+1]; return [lo,hi]; }
+function line(pts, closed){ ctx.beginPath(); pts.forEach((p,i)=>{ const s=w2s(p[0],p[1]); i?ctx.lineTo(s[0],s[1]):ctx.moveTo(s[0],s[1]); }); if(closed) ctx.closePath(); ctx.stroke(); }
+function dot(x,y,r,fill,stroke){ const s=w2s(x,y); ctx.beginPath(); ctx.arc(s[0],s[1],r,0,6.2832); ctx.fillStyle=fill; ctx.fill(); if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke();} }
+function tri(x,y,r,fill){ const s=w2s(x,y); ctx.beginPath(); ctx.moveTo(s[0],s[1]-r); ctx.lineTo(s[0]-r,s[1]+r*0.8); ctx.lineTo(s[0]+r,s[1]+r*0.8); ctx.closePath(); ctx.fillStyle=fill; ctx.fill(); ctx.strokeStyle="#fff"; ctx.lineWidth=1; ctx.stroke(); }
+
+function drawGrid(){
+  const g=S.grid; if(!g||!S.gridCv) return;
+  const a=w2s(g.x0-g.dx/2, g.y0+(g.nrow-0.5)*g.dy), b=w2s(g.x0+(g.ncol-0.5)*g.dx, g.y0-g.dy/2);
+  ctx.imageSmoothingEnabled=true; ctx.drawImage(S.gridCv, a[0], a[1], b[0]-a[0], b[1]-a[1]);
+  ctx.lineWidth=0.8;
+  S.iso.forEach((L,i)=>{ ctx.strokeStyle = (i%5===0) ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.45)"; ctx.beginPath();
+    L.segs.forEach(sg=>{ const p=w2s(sg[0],sg[1]), q=w2s(sg[2],sg[3]); ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]); }); ctx.stroke(); });
+}
+function hwTicks(f, color){
+  const P=f.trace, hw = f.hw_side==="left"?1:-1, step=46; ctx.strokeStyle=color; ctx.lineWidth=1.6;
+  let acc=0;
+  for(let i=0;i<P.length-1;i++){
+    const A=P[i],B=P[i+1], dx=B[0]-A[0], dy=B[1]-A[1], L=Math.hypot(dx,dy); if(L<1e-9) continue;
+    const nx=-dy/L*hw, ny=dx/L*hw, Ls=L*S.view.s; let t=((step/2 - acc)%step+step)%step;
+    for(let d=t; d<Ls; d+=step){ const u=d/Ls, mx=A[0]+dx*u, my=A[1]+dy*u, tl=9/S.view.s;
+      const p=w2s(mx,my), q=w2s(mx+nx*tl,my+ny*tl); ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]); ctx.stroke(); }
+    acc=(acc+Ls)%step;
+  }
+}
+function draw(){
+  ctx.clearRect(0,0,S.W,S.H); ctx.fillStyle="#EEF3F9"; ctx.fillRect(0,0,S.W,S.H);
+  if (S.mode==="digitize" && S.img){
+    const a=w2s(0,0), b=w2s(S.img.width,S.img.height); ctx.drawImage(S.img,a[0],a[1],b[0]-a[0],b[1]-a[1]);
+  } else { drawGraticule(); drawGrid(); }
+  // wells
+  S.wells.forEach(w=>{ tri(w.x,w.y,6,"#051C2C"); const s=w2s(w.x,w.y); ctx.fillStyle="#051C2C"; ctx.font="bold 10px Arial"; ctx.fillText(w.name,s[0]+8,s[1]+3); });
+  if (S.mode==="digitize"){
+    const zr=zRange();
+    S.contours.forEach((c,i)=>{ const col=rgb(ramp((c.z-zr[0])/(zr[1]-zr[0]))); ctx.strokeStyle=(i===S.active)?"#FF2D95":col; ctx.lineWidth=(i===S.active)?2.6:2; if(c.pts.length>1) line(c.pts);
+      c.pts.forEach(p=>dot(p[0],p[1],(i===S.active)?3.2:2.4,"#fff",col)); if(c.pts.length){ const s=w2s(c.pts[0][0],c.pts[0][1]); ctx.fillStyle="#051C2C"; ctx.font="bold 11px Arial"; ctx.fillText(String(c.z),s[0]+5,s[1]-5);} });
+    S.points.forEach(p=>{ dot(p[0],p[1],4,rgb(ramp((p[2]-zr[0])/(zr[1]-zr[0]))),"#051C2C"); const s=w2s(p[0],p[1]); ctx.fillStyle="#051C2C"; ctx.font="10px Arial"; ctx.fillText(String(p[2]),s[0]+6,s[1]-4); });
+    S.traces.forEach((t,i)=>{ ctx.setLineDash([7,4]); ctx.strokeStyle=(i===S.activeTrace)?"#FF2D95":"#D7263D"; ctx.lineWidth=2.4; if(t.pts.length>1) line(t.pts); ctx.setLineDash([]);
+      t.pts.forEach(p=>dot(p[0],p[1],3,"#fff","#D7263D")); if(t.pts.length){ const s=w2s(t.pts[0][0],t.pts[0][1]); ctx.fillStyle="#D7263D"; ctx.font="bold 11px Arial"; ctx.fillText(t.name,s[0]+5,s[1]-6);} });
+    S.calib.forEach((c,i)=>{ if(c.px===null) return; const s=w2s(c.px,c.py); ctx.strokeStyle="#00A9F4"; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(s[0]-9,s[1]); ctx.lineTo(s[0]+9,s[1]); ctx.moveTo(s[0],s[1]-9); ctx.lineTo(s[0],s[1]+9); ctx.stroke(); ctx.fillStyle="#00A9F4"; ctx.font="bold 11px Arial"; ctx.fillText("C"+(i+1),s[0]+8,s[1]-8); });
+    const bp=boundaryPoints();
+    if(bp.length){
+      ctx.strokeStyle="#FFFFFF"; ctx.lineWidth=5; line(bp,true);
+      ctx.strokeStyle="#00A9F4"; ctx.lineWidth=3; line(bp,true);
+      const s=w2s(bp[0][0],bp[0][1]); ctx.fillStyle="#00A9F4"; ctx.font="bold 11px Arial"; ctx.fillText(S.boundary+" (boundary)",s[0]+6,s[1]-6);
+    }
+  } else if (S.mode==="faults"){
+    S.faults.forEach((f,i)=>{ const col=f.color||COLORS[i%COLORS.length], on=(i===S.sel);
+      ctx.strokeStyle=col; ctx.lineWidth=on?3.4:2.4; line(f.trace); hwTicks(f,col);
+      const s=w2s(f.trace[0][0],f.trace[0][1]); ctx.fillStyle=col; ctx.font="bold 11px Arial"; ctx.fillText(f.name,s[0]+6,s[1]-6);
+      if(on) f.trace.forEach(p=>dot(p[0],p[1],5,"#fff",col)); });
+    if (S.newFault && S.newFault.length){ ctx.setLineDash([6,4]); ctx.strokeStyle="#FF2D95"; ctx.lineWidth=2.4; line(S.newFault); ctx.setLineDash([]);
+      S.newFault.forEach(p=>dot(p[0],p[1],4,"#fff","#FF2D95"));
+      if(S.mouse){ const m=s2w(S.mouse[0],S.mouse[1]), l=S.newFault[S.newFault.length-1]; ctx.setLineDash([2,4]); line([l,m]); ctx.setLineDash([]); } }
+  } else if (S.mode==="polygons"){
+    S.polys.forEach((p,i)=>{ const isB=!S.open&&(p.name===S.boundary), on=(i===S.psel), col=S.open?"#B8003C":(isB?"#00A9F4":"#051C2C");
+      ctx.beginPath(); p.pts.forEach((q,k)=>{ const s=w2s(q[0],q[1]); k?ctx.lineTo(s[0],s[1]):ctx.moveTo(s[0],s[1]); }); if(!S.open){ ctx.closePath();
+      ctx.fillStyle=isB?"rgba(0,169,244,0.10)":"rgba(5,28,44,0.06)"; ctx.fill(); }
+      ctx.strokeStyle=on?"#FF2D95":col; ctx.lineWidth=on?3.2:2.2; ctx.setLineDash(S.open?[]:(isB?[]:[8,4])); ctx.stroke(); ctx.setLineDash([]);
+      const s0=w2s(p.pts[0][0],p.pts[0][1]); ctx.fillStyle=col; ctx.font="bold 11px Arial"; ctx.fillText(p.name+(isB?" (boundary)":""),s0[0]+6,s0[1]-6);
+      if(on) p.pts.forEach(q=>dot(q[0],q[1],5,"#fff","#FF2D95")); });
+    if (S.newPoly && S.newPoly.length){ ctx.strokeStyle="#FF2D95"; ctx.lineWidth=2.4; ctx.setLineDash([6,4]); line(S.newPoly); ctx.setLineDash([]);
+      S.newPoly.forEach(q=>dot(q[0],q[1],4,"#fff","#FF2D95"));
+      if(S.mouse){ const m=s2w(S.mouse[0],S.mouse[1]), l=S.newPoly[S.newPoly.length-1], f0=S.newPoly[0]; ctx.setLineDash([2,4]); line(S.open?[l,m]:[l,m,f0]); ctx.setLineDash([]); } }
+  }
+  // rubber band for active digitizing line
+  if (S.mode==="digitize" && S.mouse){
+    let L=null; if(S.tool==="line"&&S.active>=0) L=S.contours[S.active].pts; if(S.tool==="trace"&&S.activeTrace>=0) L=S.traces[S.activeTrace].pts;
+    if(L&&L.length){ const m=s2w(S.mouse[0],S.mouse[1]); ctx.setLineDash([2,4]); ctx.strokeStyle="#FF2D95"; ctx.lineWidth=1.4; line([L[L.length-1],m]); ctx.setLineDash([]); } }
+}
+
+/* ---------- grid / contours preprocessing ---------- */
+function buildGrid(g){
+  S.grid=g; S.gridCv=null; S.iso=[]; if(!g) return;
+  const c=document.createElement("canvas"); c.width=g.ncol; c.height=g.nrow; const x=c.getContext("2d"), im=x.createImageData(g.ncol,g.nrow);
+  const lo=g.zmin, hi=g.zmax, span=(hi-lo)||1;
+  for(let j=0;j<g.nrow;j++) for(let i=0;i<g.ncol;i++){ const z=g.z[j*g.ncol+i], o=((g.nrow-1-j)*g.ncol+i)*4;
+    if(z===null||z===undefined){ im.data[o+3]=0; continue; } const col=ramp((z-lo)/span); im.data[o]=col[0]; im.data[o+1]=col[1]; im.data[o+2]=col[2]; im.data[o+3]=255; }
+  x.putImageData(im,0,0); S.gridCv=c;
+  const dz = niceStep(span*6/14), first=Math.ceil(lo/dz)*dz;
+  for(let L=first, k=0; L<=hi; L+=dz, k++){ const segs=[];
+    for(let j=0;j<g.nrow-1;j++) for(let i=0;i<g.ncol-1;i++){
+      const a=g.z[j*g.ncol+i], b=g.z[j*g.ncol+i+1], c2=g.z[(j+1)*g.ncol+i+1], d=g.z[(j+1)*g.ncol+i];
+      if(a==null||b==null||c2==null||d==null) continue;
+      const idx=(a>L?1:0)|(b>L?2:0)|(c2>L?4:0)|(d>L?8:0); if(idx===0||idx===15) continue;
+      const X0=g.x0+i*g.dx, Y0=g.y0+j*g.dy, t=(u,v)=>(L-u)/(v-u);
+      const E={B:[X0+t(a,b)*g.dx,Y0], R:[X0+g.dx,Y0+t(b,c2)*g.dy], T:[X0+t(d,c2)*g.dx,Y0+g.dy], Lf:[X0,Y0+t(a,d)*g.dy]};
+      const T={1:[["Lf","B"]],2:[["B","R"]],3:[["Lf","R"]],4:[["R","T"]],5:[["Lf","T"],["B","R"]],6:[["B","T"]],7:[["Lf","T"]],8:[["Lf","T"]],9:[["B","T"]],10:[["Lf","B"],["R","T"]],11:[["R","T"]],12:[["Lf","R"]],13:[["B","R"]],14:[["Lf","B"]]}[idx];
+      T.forEach(pr=>segs.push([E[pr[0]][0],E[pr[0]][1],E[pr[1]][0],E[pr[1]][1]])); }
+    S.iso.push({lvl:L,segs:segs}); }
+}
+
+/* ---------- messaging / panel ---------- */
+function say(t,err){ S.msg=t; S.msgErr=!!err; const m=document.getElementById("msg"); if(m){ m.textContent=t; m.className="msg"+(err?" err":""); m.style.display=t?"block":"none"; } }
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function buildBar(){
+  const bar=document.getElementById("bar"); const t=[];
+  if(S.mode==="digitize"){
+    t.push(["line","Contour line"],["pt","Spot point"],["trace","Fault trace"],["pan","Pan"]);
+  } else if(S.mode==="polygons"){ t.push(["draw",S.open?"Draw fence":"Draw polygon"],["edit","Select / edit"],["pan","Pan"]);
+  } else { t.push(["draw","Draw fault"],["edit","Select / edit"],["pan","Pan"]); }
+  bar.innerHTML='<span class="ttl">'+(S.mode==="digitize"?"Map digitizer":S.mode==="polygons"?(S.open?"Fence editor":"Polygon editor"):"Fault designer")+'</span>'+
+    t.map(x=>'<button data-tool="'+x[0]+'" class="'+(S.tool===x[0]?"on":"")+'">'+x[1]+'</button>').join("")+
+    '<span style="flex:1"></span><button id="bFit">Fit view</button><button id="bUndo">Undo</button>';
+  bar.querySelectorAll("[data-tool]").forEach(b=>b.onclick=()=>{ finishAny(); S.tool=b.dataset.tool; buildBar(); wireBar(); helpText(); draw(); });
+  wireBar();
+}
+function wireBar(){ document.getElementById("bFit").onclick=fitView; document.getElementById("bUndo").onclick=undo; }
+function helpText(){
+  let h={line:"Click to add vertices - double-click or Enter to finish the contour - Esc cancels",pt:"Click to drop a spot value (z from the panel)",
+    trace:"Click to add vertices - double-click or Enter to finish the fault trace",pan:"Drag to pan - wheel to zoom",
+    draw:"Click to add vertices along the fault - double-click or Enter to finish (draw in the direction you want 'left/right' to refer to)",
+    edit:"Click a fault to select - drag vertices - double-click a segment to insert a vertex - Shift+click a vertex to delete"}[S.tool];
+  if(S.mode==="polygons"){ h={draw:S.open?"Click to add vertices along the fence - double-click or Enter finishes it - Esc cancels":"Click to add vertices - double-click or Enter closes the polygon - Esc cancels",
+    edit:"Click a "+(S.open?"fence":"polygon")+" to select - drag vertices - double-click an edge to insert a vertex - Shift+click a vertex to delete",
+    pan:"Drag to pan - wheel to zoom"}[S.tool]; }
+  document.getElementById("help").textContent=(h||"")+"  |  wheel: zoom, middle/right-drag or Space+drag: pan";
+}
+
+function buildPanel(){
+  const p=document.getElementById("panel");
+  if(S.mode==="digitize"){
+    const T=affine(), rms=calibRMS(T);
+    let h='<h4>1 - Background map</h4><input type="file" id="fImg" accept="image/*"><div class="hint">'+(S.img?("Loaded: "+esc(S.imgName)+" ("+S.img.width+" x "+S.img.height+" px)"):"No image: digitize directly in model coordinates.")+'</div>';
+    if(S.img) h+='<button id="bClearImg" style="margin-top:4px">Remove image</button>';
+    if(S.img){
+      h+='<h4>2 - Calibrate (min. 2 points, 3+ for rotation)</h4><div class="hint">Press Pick, click a known location on the map, type its X / Y.</div>';
+      S.calib.forEach((c,i)=>{ h+='<div class="cal"><button data-pick="'+i+'" class="'+(S.calibPick===i?"primary":"")+'">C'+(i+1)+'</button><input type="text" data-cx="'+i+'" placeholder="X" value="'+esc(c.X)+'"><input type="text" data-cy="'+i+'" placeholder="Y" value="'+esc(c.Y)+'"></div>'+
+        '<div class="hint" style="margin:0 0 2px 48px">'+(c.px===null?"not picked":("px "+c.px.toFixed(0)+", "+c.py.toFixed(0)))+'</div>'; });
+      h+='<div class="msg" style="border-color:'+(T?"#00A9F4":"#D7263D")+'">'+(T?("Calibration: "+T.kind+(rms!==null?(" - RMS misfit "+rms.toFixed(2)):"")):"Calibration incomplete")+'</div>';
+    }
+    if(S.boundary && S.polys.some(p=>p.name===S.boundary)) h+='<label><input type="checkbox" id="showBoundary" '+(S.showBoundary?"checked":"")+'> Show model boundary</label>'+
+      (S.img&&!T?'<div class="hint">Calibrate the image to place the boundary in map coordinates.</div>':"");
+    h+='<h4>'+(S.img?"3":"2")+' - Digitize</h4><div class="row"><div><label>'+(S.active>=0?"Depth of selected contour / next point":"Depth of next contour / point")+'</label><input type="number" id="zVal" step="any" value="'+S.zVal+'"></div>'+
+       '<div><label>Depth step after each contour (0 = off)</label><input type="number" id="zStep" step="any" value="'+S.zStep+'"></div></div>'+
+       '<div class="hint">Select a contour in Contents to correct its depth. Finish it before drawing the next contour.</div>'+
+       '<div class="row" style="margin-top:6px"><button id="bFinish">Finish line</button><button id="bDelLine" class="danger">Delete active</button></div>';
+    h+='<h4>Contents</h4><div class="list">'+
+       S.contours.map((c,i)=>'<div data-c="'+i+'" class="'+(i===S.active?"sel":"")+'"><span>Contour z='+c.z+'</span><span>'+c.pts.length+' pts</span></div>').join("")+
+       S.traces.map((t,i)=>'<div data-t="'+i+'" class="'+(i===S.activeTrace?"sel":"")+'"><span style="color:#D7263D">'+esc(t.name)+'</span><span>'+t.pts.length+' pts</span></div>').join("")+
+       (S.points.length?'<div><span>Spot points</span><span>'+S.points.length+'</span></div>':"")+
+       ((S.contours.length+S.traces.length+S.points.length)?"":'<div style="color:#6B7A8C">empty</div>')+'</div>';
+    h+='<div class="row" style="margin-top:8px"><button id="bClear" class="danger">Clear all</button><button id="bSend" class="primary">Send to Python</button></div><div id="msg" class="msg" style="display:none"></div>';
+    p.innerHTML=h;
+    const q=id=>document.getElementById(id);
+    if(q("fImg")) q("fImg").onchange=e=>loadImage(e.target.files[0]);
+    if(q("bClearImg")) q("bClearImg").onclick=()=>{ S.img=null; S.imgName=""; S.view.yDown=false; fitView(); buildPanel(); };
+    p.querySelectorAll("[data-pick]").forEach(b=>b.onclick=()=>{ S.calibPick=(S.calibPick===+b.dataset.pick)?-1:+b.dataset.pick; buildPanel(); say(S.calibPick>=0?"Click the map at control point C"+(S.calibPick+1):""); });
+    p.querySelectorAll("[data-cx]").forEach(i=>i.oninput=()=>{ S.calib[+i.dataset.cx].X=i.value; refreshCalibMsg(); });
+    p.querySelectorAll("[data-cy]").forEach(i=>i.oninput=()=>{ S.calib[+i.dataset.cy].Y=i.value; refreshCalibMsg(); });
+    if(q("showBoundary")) q("showBoundary").onchange=e=>{ S.showBoundary=e.target.checked; draw(); };
+    q("zVal").oninput=e=>{ S.zVal=parseFloat(e.target.value); if(S.active>=0 && isFinite(S.zVal)){ S.contours[S.active].z=S.zVal; draw(); } };
+    q("zStep").oninput=e=>{ S.zStep=parseFloat(e.target.value)||0; };
+    q("bFinish").onclick=()=>{ finishAny(); draw(); buildPanel(); };
+    q("bDelLine").onclick=()=>{ if(S.active>=0){S.contours.splice(S.active,1);S.active=-1;} else if(S.activeTrace>=0){S.traces.splice(S.activeTrace,1);S.activeTrace=-1;} draw(); buildPanel(); };
+    p.querySelectorAll("[data-c]").forEach(d=>d.onclick=()=>{ S.active=+d.dataset.c; S.activeTrace=-1; S.zVal=S.contours[S.active].z; draw(); buildPanel(); });
+    p.querySelectorAll("[data-t]").forEach(d=>d.onclick=()=>{ S.activeTrace=+d.dataset.t; S.active=-1; draw(); buildPanel(); });
+    q("bClear").onclick=()=>{ S.contours=[];S.points=[];S.traces=[];S.active=-1;S.activeTrace=-1; draw(); buildPanel(); };
+    q("bSend").onclick=sendDigitized;
+  } else if(S.mode==="polygons"){
+    const NM=S.open?'fence':'polygon'; let h='<h4>'+(S.open?'Fences':'Polygons')+' ('+S.polys.length+')</h4><div class="list">'+S.polys.map((p,i)=>'<div data-p="'+i+'" class="'+(i===S.psel?"sel":"")+'"><span>'+(!S.open&&p.name===S.boundary?"&#9632; ":"")+esc(p.name)+'</span><span>'+p.pts.length+' pts</span></div>').join("")+(S.polys.length?"":'<div style="color:#6B7A8C">none yet - use Draw '+NM+'</div>')+'</div>';
+    const pl=S.polys[S.psel];
+    if(pl){ h+='<h4>Selected '+NM+'</h4><label>Name</label><input type="text" id="pName" value="'+esc(pl.name)+'">'+
+        (S.open?'<div class="msg" style="margin:6px 0">Length '+(polyLen(pl.pts)/1000).toFixed(2)+' km (project XY units / 1000)</div>':'<div class="msg" style="margin:6px 0">Area '+(polyArea(pl.pts)/1e6).toFixed(2)+' km&sup2;</div>'+
+        '<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" id="pBound" '+(pl.name===S.boundary?"checked":"")+'> Use as model boundary</label>')+
+        '<div class="row" style="margin-top:6px"><button id="pRev">Reverse order</button><button id="pDel" class="danger">Delete '+NM+'</button></div>'; }
+    h+='<div class="row" style="margin-top:10px"><button id="bSend" class="primary">Apply to project</button></div><div id="msg" class="msg" style="display:none"></div>';
+    h+=S.open?'<div class="hint">A fence is an open line (a polyline) along which the cross-section is cut: it can bend, e.g. to pass through several wells. Edits stay in this editor until you press Apply.</div>':'<div class="hint">The model boundary clips surfaces (Filter &amp; clip) and switches off grid cells outside it. Edits stay in this editor until you press Apply.</div>';
+    p_=document.getElementById("panel"); p_.innerHTML=h; const q=id=>document.getElementById(id);
+    p_.querySelectorAll("[data-p]").forEach(d=>d.onclick=()=>{ S.psel=+d.dataset.p; buildPanel(); draw(); });
+    if(pl){ q("pName").oninput=e=>{ const old=pl.name; pl.name=e.target.value; if(S.boundary===old) S.boundary=pl.name; draw(); };
+      if(q("pBound")) q("pBound").onchange=e=>{ S.boundary=e.target.checked?pl.name:""; draw(); buildPanel(); };
+      q("pRev").onclick=()=>{ pl.pts.reverse(); draw(); };
+      q("pDel").onclick=()=>{ if(S.boundary===pl.name) S.boundary=""; S.polys.splice(S.psel,1); S.psel=Math.min(S.psel,S.polys.length-1); buildPanel(); draw(); }; }
+    q("bSend").onclick=sendPolys;
+  } else {
+    let h='<h4>Faults ('+S.faults.length+')</h4><div class="list">'+S.faults.map((f,i)=>'<div data-f="'+i+'" class="'+(i===S.sel?"sel":"")+'"><span><span class="swatch" style="background:'+(f.color||COLORS[i%COLORS.length])+'"></span>'+esc(f.name)+'</span><span>'+f.ftype+' '+f.throw+' m</span></div>').join("")+(S.faults.length?"":'<div style="color:#6B7A8C">No faults yet - use "Draw fault"</div>')+'</div>';
+    const f=S.faults[S.sel];
+    if(f){ const o=(arr,v)=>arr.map(x=>'<option'+(x===v?" selected":"")+'>'+x+'</option>').join("");
+      h+='<h4>Selected fault</h4><label>Name</label><input type="text" id="fName" value="'+esc(f.name)+'">'+
+        '<div class="row"><div><label>Type</label><select id="fType">'+o(["normal","reverse","strike_slip","transverse"],f.ftype)+'</select></div><div><label>Profile</label><select id="fProf">'+o(["elliptical","triangular","plateau","constant"],f.profile)+'</select></div></div>'+
+        '<div class="row"><div><label>Max throw (m)</label><input type="number" id="fThrow" step="any" value="'+f.throw+'"></div><div><label>Dip (deg)</label><input type="number" id="fDip" step="any" value="'+f.dip+'"></div></div>'+
+        '<div class="row"><div><label>Drag zone (m)</label><input type="number" id="fDrag" step="any" value="'+f.drag+'"></div><div><label>Growth (m/100 m)</label><input type="number" id="fGrow" step="any" value="'+f.growth+'"></div></div>'+
+        '<label>Reference depth zref (m)</label><input type="number" id="fZref" step="any" value="'+f.zref+'">'+
+        '<div class="row"><div><label>Heave (0-1)</label><input type="number" id="fHeave" step="0.1" min="0" max="1" value="'+(f.heave||0)+'"></div>'+
+        ((f.ftype==="strike_slip"||f.ftype==="transverse")?'<div><label>Lateral slip (m)</label><input type="number" id="fSlip" step="any" value="'+(f.slip||0)+'"></div>':'<div></div>')+'</div>'+
+        ((f.ftype==="strike_slip"||f.ftype==="transverse")?'<div class="row"><div><label>Slip sense</label><select id="fSense">'+o(["dextral","sinistral"],f.slip_sense||"dextral")+'</select></div>'+
+          (f.ftype==="transverse"?'<div><label>Pivot (0-1 along trace)</label><input type="number" id="fPivot" step="0.05" min="0" max="1" value="'+(f.pivot==null?0.5:f.pivot)+'"></div>':'<div></div>')+'</div>':'')+
+        '<div class="row" style="margin-top:6px"><div class="msg" style="margin:0">Hanging wall: <b>'+f.hw_side+'</b> of trace direction (ticks)</div><button id="fFlip">Flip side</button></div>'+
+        '<div class="row" style="margin-top:6px"><button id="fRev">Reverse trace</button><button id="fDel" class="danger">Delete fault</button></div>';
+    }
+    h+='<div class="row" style="margin-top:10px"><button id="bSend" class="primary">Apply to model</button></div><div id="msg" class="msg" style="display:none"></div>';
+    h+='<div class="hint">Ticks sit on the hanging wall. For normal faults that is the downthrown block. Edits stay in this editor until you press Apply.</div>';
+    p.innerHTML=h; const q=id=>document.getElementById(id);
+    p.querySelectorAll("[data-f]").forEach(d=>d.onclick=()=>{ S.sel=+d.dataset.f; buildPanel(); draw(); });
+    if(f){ const bind=(id,key,num)=>{ q(id).oninput=q(id).onchange=e=>{ f[key]=num?(parseFloat(e.target.value)||0):e.target.value; if(key==="name"||key==="ftype"||key==="throw"){ const lst=p.querySelector('[data-f="'+S.sel+'"]'); if(lst) lst.lastChild.textContent=f.ftype+" "+f.throw+" m"; if(key==="name"&&lst) lst.firstChild.lastChild.textContent=f.name; } draw(); }; };
+      bind("fName","name",false); bind("fType","ftype",false); bind("fProf","profile",false); bind("fThrow","throw",true); bind("fDip","dip",true); bind("fDrag","drag",true); bind("fGrow","growth",true); bind("fZref","zref",true);
+      ["fHeave:heave","fSlip:slip","fPivot:pivot"].forEach(k=>{ const kk=k.split(":"); if(q(kk[0])) bind(kk[0],kk[1],true); });
+      if(q("fSense")) bind("fSense","slip_sense",false);
+      q("fType").addEventListener("change",()=>{ buildPanel(); });
+      q("fFlip").onclick=()=>{ f.hw_side=(f.hw_side==="left"?"right":"left"); buildPanel(); draw(); };
+      q("fRev").onclick=()=>{ f.trace.reverse(); if(f.ftype==="transverse") f.pivot=1-(f.pivot==null?0.5:f.pivot); f.hw_side=(f.hw_side==="left"?"right":"left"); draw(); buildPanel(); say("Trace reversed; hanging wall stays on the same physical side."); };
+      q("fDel").onclick=()=>{ S.faults.splice(S.sel,1); S.sel=Math.min(S.sel,S.faults.length-1); buildPanel(); draw(); };
+    }
+    q("bSend").onclick=sendFaults;
+  }
+  if(S.msg) say(S.msg,S.msgErr);
+}
+function polyArea(P){ let a=0; for(let i=0;i<P.length;i++){ const j=(i+1)%P.length; a+=P[i][0]*P[j][1]-P[j][0]*P[i][1]; } return Math.abs(a)/2; }
+let p_=null;
+function refreshCalibMsg(){ draw(); const T=affine(), rms=calibRMS(T); const el=document.querySelector("#panel .msg"); /* lightweight refresh: rebuild only message */
+  const boxes=[...document.querySelectorAll("#panel .msg")].filter(m=>m.textContent.startsWith("Calib")); if(boxes[0]){ boxes[0].textContent=T?("Calibration: "+T.kind+(rms!==null?(" - RMS misfit "+rms.toFixed(2)):"")):"Calibration incomplete"; boxes[0].style.borderColor=T?"#00A9F4":"#D7263D"; } }
+
+/* ---------- actions ---------- */
+function loadImage(file){
+  if(!file) return; const rd=new FileReader();
+  rd.onload=()=>{ const im=new Image(); im.onload=()=>{ S.img=im; S.imgName=file.name; S.contours=[];S.points=[];S.traces=[];S.active=-1;S.activeTrace=-1; S.calib.forEach(c=>{c.px=null;c.py=null;}); fitView(); buildPanel(); say("Image loaded. Calibrate it before sending."); }; im.src=rd.result; };
+  rd.readAsDataURL(file);
+}
+function finishAny(){
+  if(S.mode==="digitize"){
+    if(S.active>=0){ if(S.contours[S.active].pts.length<2) S.contours.splice(S.active,1); else if(S.zStep!==0){ S.zVal=Math.round((S.contours[S.active].z+S.zStep)*1e6)/1e6; } S.active=-1; }
+    if(S.activeTrace>=0){ if(S.traces[S.activeTrace].pts.length<2) S.traces.splice(S.activeTrace,1); S.activeTrace=-1; }
+  } else if(S.mode==="polygons"){ if(S.newPoly){ if(S.newPoly.length>=(S.open?2:3)) addPoly(S.newPoly); S.newPoly=null; }
+  } else if(S.newFault){ if(S.newFault.length>=2) addFault(S.newFault); S.newFault=null; }
+  if(S.mode==="digitize") buildPanel();
+}
+function polyLen(P){ let L=0; for(let i=1;i<P.length;i++) L+=Math.hypot(P[i][0]-P[i-1][0],P[i][1]-P[i-1][1]); return L; }
+function addPoly(pts){
+  let n=S.polys.length+1, name=(S.open?"Fence_":"Polygon_")+n; while(S.polys.some(p=>p.name===name)) name=(S.open?"Fence_":"Polygon_")+(++n);
+  S.polys.push({name:name,pts:pts.map(p=>[p[0],p[1]])}); S.psel=S.polys.length-1; S.tool="edit"; buildBar(); helpText(); buildPanel();
+}
+function addFault(trace){
+  let n=S.faults.length+1, name="F"+n; while(S.faults.some(f=>f.name===name)) name="F"+(++n);
+  const d=S.defaults||{};
+  S.faults.push({name:name,trace:trace.map(p=>[p[0],p[1]]),ftype:d.ftype||"normal",throw:d.throw||50,dip:d.dip||65,hw_side:"left",profile:d.profile||"elliptical",drag:d.drag||250,growth:d.growth||0,zref:d.zref||2000,slip:0,slip_sense:"dextral",pivot:0.5,heave:0,color:COLORS[(S.faults.length)%COLORS.length]});
+  S.sel=S.faults.length-1; S.tool="edit"; buildBar(); helpText(); buildPanel();
+}
+function undo(){
+  if(S.mode==="digitize"){
+    if(S.tool==="line"&&S.active>=0){ S.contours[S.active].pts.pop(); if(!S.contours[S.active].pts.length){S.contours.splice(S.active,1);S.active=-1;} }
+    else if(S.tool==="trace"&&S.activeTrace>=0){ S.traces[S.activeTrace].pts.pop(); if(!S.traces[S.activeTrace].pts.length){S.traces.splice(S.activeTrace,1);S.activeTrace=-1;} }
+    else if(S.tool==="pt"){ S.points.pop(); }
+    else if(S.contours.length&&S.tool==="line"){ S.contours.pop(); }
+    buildPanel();
+  } else if(S.mode==="polygons"){ if(S.newPoly&&S.newPoly.length) S.newPoly.pop(); }
+  else if(S.newFault&&S.newFault.length){ S.newFault.pop(); }
+  draw();
+}
+function sendDigitized(){
+  finishAny(); const f=toWorld();
+  if(!f){ say("Calibrate the image first (at least 2 control points with X and Y).",true); return; }
+  const T=affine(), rms=T?calibRMS(T):null;
+  const out={kind:"digitize", nonce:++S.nonce,
+    contours:S.contours.map(c=>({z:c.z, pts:c.pts.map(p=>f(p[0],p[1]))})),
+    points:S.points.map(p=>{ const w=f(p[0],p[1]); return [w[0],w[1],p[2]]; }),
+    faults:S.traces.map(t=>({name:t.name, pts:t.pts.map(p=>f(p[0],p[1]))})),
+    calib:S.img?{kind:T.kind,rms:rms,points:calibPoints()}:null};
+  setValue(out); say("Sent "+out.contours.length+" contour(s), "+out.points.length+" point(s), "+out.faults.length+" fault trace(s) to Python.");
+  draw();
+}
+function sendPolys(){
+  finishAny();
+  setValue({kind:S.open?"fences":"polygons", nonce:++S.nonce, boundary:S.open?null:(S.boundary||null), polygons:S.polys.map(p=>({name:p.name,pts:p.pts}))});
+  say("Applied "+S.polys.length+(S.open?" fence(s)":" polygon(s)")+" to the project.");
+}
+function sendFaults(){
+  finishAny();
+  setValue({kind:"faults", nonce:++S.nonce, faults:S.faults.map(f=>({name:f.name,trace:f.trace,ftype:f.ftype,throw:f.throw,dip:f.dip,hw_side:f.hw_side,profile:f.profile,drag:f.drag,growth:f.growth,zref:f.zref,slip:f.slip||0,slip_sense:f.slip_sense||"dextral",pivot:f.pivot==null?0.5:f.pivot,heave:f.heave||0,color:f.color}))});
+  say("Applied "+S.faults.length+" fault(s) to the model.");
+}
+
+/* ---------- mouse ---------- */
+function pos(e){ const r=cv.getBoundingClientRect(); return [e.clientX-r.left,e.clientY-r.top]; }
+function distSeg(p,a,b){ const dx=b[0]-a[0],dy=b[1]-a[1],l2=dx*dx+dy*dy; let t=l2?((p[0]-a[0])*dx+(p[1]-a[1])*dy)/l2:0; t=Math.max(0,Math.min(1,t)); return [Math.hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy),t]; }
+function hitPoly(sp){
+  let best=null;
+  S.polys.forEach((p,pi)=>{ const sc=p.pts.map(q=>w2s(q[0],q[1])), n=sc.length;
+    sc.forEach((q,vi)=>{ const d=Math.hypot(q[0]-sp[0],q[1]-sp[1]); if(d<9&&(!best||d<best.d||best.kind!=="v")) best={kind:"v",pi:pi,vi:vi,d:d}; });
+    for(let k=0;k<(S.open?n-1:n);k++){ const r=distSeg(sp,sc[k],sc[(k+1)%n]); if(r[0]<7&&(!best||(best.kind!=="v"&&r[0]<best.d))) best={kind:"s",pi:pi,si:k,t:r[1],d:r[0]}; } });
+  return best;
+}
+function hitFault(sp){ // returns {fi, vi} vertex hit or {fi, si, t} segment hit
+  let best=null;
+  S.faults.forEach((f,fi)=>{ const sc=f.trace.map(p=>w2s(p[0],p[1]));
+    sc.forEach((q,vi)=>{ const d=Math.hypot(q[0]-sp[0],q[1]-sp[1]); if(d<9&&(!best||d<best.d||best.kind!=="v")) best={kind:"v",fi:fi,vi:vi,d:d}; });
+    for(let k=0;k<sc.length-1;k++){ const r=distSeg(sp,sc[k],sc[k+1]); if(r[0]<7&&(!best||(best.kind!=="v"&&r[0]<best.d))) best={kind:"s",fi:fi,si:k,t:r[1],d:r[0]}; } });
+  return best;
+}
+cv.addEventListener("mousedown",e=>{
+  const sp=pos(e); S.drag=null;
+  if(e.button===1||e.button===2||S.spaceDown||S.tool==="pan"){ S.pan={sx:sp[0],sy:sp[1],vx:S.view.vx,vy:S.view.vy,moved:false}; e.preventDefault(); return; }
+  if(S.mode==="faults"&&S.tool==="edit"){ const h=hitFault(sp);
+    if(h&&h.kind==="v"&&e.shiftKey){ const f=S.faults[h.fi]; if(f.trace.length>2){ f.trace.splice(h.vi,1); draw(); } return; }
+    if(h&&h.kind==="v"&&h.fi===S.sel){ S.drag={fi:h.fi,vi:h.vi}; return; } }
+  if(S.mode==="polygons"&&S.tool==="edit"){ const h=hitPoly(sp);
+    if(h&&h.kind==="v"&&e.shiftKey){ const p=S.polys[h.pi]; if(p.pts.length>(S.open?2:3)){ p.pts.splice(h.vi,1); draw(); } return; }
+    if(h&&h.kind==="v"&&h.pi===S.psel){ S.pdrag={pi:h.pi,vi:h.vi}; return; } }
+  S.click={sp:sp,t:Date.now()};
+});
+cv.addEventListener("contextmenu",e=>e.preventDefault());
+window.addEventListener("mousemove",e=>{
+  const sp=pos(e); S.mouse=sp;
+  if(S.pan){ const dx=sp[0]-S.pan.sx, dy=sp[1]-S.pan.sy; if(Math.abs(dx)+Math.abs(dy)>3) S.pan.moved=true;
+    S.view.vx=S.pan.vx-dx/S.view.s; S.view.vy=S.view.yDown?S.pan.vy-dy/S.view.s:S.pan.vy+dy/S.view.s; draw(); return; }
+  if(S.drag){ const w=s2w(sp[0],sp[1]); S.faults[S.drag.fi].trace[S.drag.vi]=[w[0],w[1]]; draw(); }
+  if(S.pdrag){ const w=s2w(sp[0],sp[1]); S.polys[S.pdrag.pi].pts[S.pdrag.vi]=[w[0],w[1]]; draw(); }
+  const w=s2w(sp[0],sp[1]); let txt="x "+w[0].toFixed(1)+"   y "+w[1].toFixed(1);
+  if(S.mode==="digitize"&&S.img){ const T=affine(); txt="px "+w[0].toFixed(0)+", "+w[1].toFixed(0)+(T?("   ->   X "+applyT(T,w[0],w[1])[0].toFixed(1)+"  Y "+applyT(T,w[0],w[1])[1].toFixed(1)):"   (not calibrated)"); }
+  if(S.grid&&S.mode==="faults"){ const g=S.grid, i=Math.round((w[0]-g.x0)/g.dx), j=Math.round((w[1]-g.y0)/g.dy); if(i>=0&&j>=0&&i<g.ncol&&j<g.nrow){ const z=g.z[j*g.ncol+i]; if(z!=null) txt+="   z "+z.toFixed(1); } }
+  document.getElementById("coord").textContent=txt;
+  if(S.mode==="digitize"&&(S.active>=0||S.activeTrace>=0)||S.newFault||S.newPoly) draw();
+});
+window.addEventListener("mouseup",e=>{
+  if(S.pan){ const moved=S.pan.moved; S.pan=null; if(moved) return; }
+  if(S.drag){ S.drag=null; return; }
+  if(S.pdrag){ S.pdrag=null; return; }
+  const c=S.click; S.click=null; if(!c||e.target!==cv) return; const sp=pos(e); if(Math.hypot(sp[0]-c.sp[0],sp[1]-c.sp[1])>4) return;
+  handleClick(sp,e);
+});
+function handleClick(sp,e){
+  const w=s2w(sp[0],sp[1]);
+  if(S.mode==="digitize"){
+    if(S.calibPick>=0){ S.calib[S.calibPick].px=w[0]; S.calib[S.calibPick].py=w[1]; S.calibPick=-1; say("Control point stored - now type its X and Y."); buildPanel(); draw(); return; }
+    if(S.tool==="line"){ if(S.active<0){ if(!isFinite(S.zVal)){ say("Enter a z value first.",true); return; } S.contours.push({z:S.zVal,pts:[]}); S.active=S.contours.length-1; S.activeTrace=-1; }
+      S.contours[S.active].pts.push([w[0],w[1]]); buildPanelLight(); }
+    else if(S.tool==="trace"){ if(S.activeTrace<0){ S.traces.push({name:"Fault_"+(S.traces.length+1),pts:[]}); S.activeTrace=S.traces.length-1; S.active=-1; }
+      S.traces[S.activeTrace].pts.push([w[0],w[1]]); buildPanelLight(); }
+    else if(S.tool==="pt"){ if(!isFinite(S.zVal)){ say("Enter a z value first.",true); return; } S.points.push([w[0],w[1],S.zVal]); buildPanelLight(); }
+  } else if(S.mode==="polygons"){
+    if(S.tool==="draw"){ if(!S.newPoly) S.newPoly=[]; S.newPoly.push([w[0],w[1]]); }
+    else if(S.tool==="edit"){ const h=hitPoly(sp); S.psel=h?h.pi:-1; buildPanel(); }
+  } else {
+    if(S.tool==="draw"){ if(!S.newFault) S.newFault=[]; S.newFault.push([w[0],w[1]]); }
+    else if(S.tool==="edit"){ const h=hitFault(sp); if(h){ S.sel=h.fi; } else S.sel=-1; buildPanel(); }
+  }
+  draw();
+}
+let panelTimer=null; function buildPanelLight(){ clearTimeout(panelTimer); panelTimer=setTimeout(()=>{ const a=document.activeElement; if(!(a&&a.tagName==="INPUT")) buildPanel(); },250); }
+cv.addEventListener("dblclick",e=>{
+  const sp=pos(e);
+  if(S.mode==="digitize"){ if(S.tool==="line"&&S.active>=0){ S.contours[S.active].pts.pop(); finishAny(); draw(); buildPanel(); } else if(S.tool==="trace"&&S.activeTrace>=0){ S.traces[S.activeTrace].pts.pop(); finishAny(); draw(); buildPanel(); } }
+  else if(S.mode==="polygons"){
+    if(S.tool==="draw"&&S.newPoly){ S.newPoly.pop(); finishAny(); draw(); }
+    else if(S.tool==="edit"){ const h=hitPoly(sp); if(h&&h.kind==="s"){ const p=S.polys[h.pi], a=p.pts[h.si], b=p.pts[(h.si+1)%p.pts.length]; p.pts.splice(h.si+1,0,[a[0]+(b[0]-a[0])*h.t,a[1]+(b[1]-a[1])*h.t]); S.psel=h.pi; draw(); buildPanel(); } } }
+  else if(S.tool==="draw"&&S.newFault){ S.newFault.pop(); finishAny(); draw(); }
+  else if(S.tool==="edit"){ const h=hitFault(sp); if(h&&h.kind==="s"){ const f=S.faults[h.fi], a=f.trace[h.si], b=f.trace[h.si+1]; f.trace.splice(h.si+1,0,[a[0]+(b[0]-a[0])*h.t,a[1]+(b[1]-a[1])*h.t]); S.sel=h.fi; draw(); buildPanel(); } }
+});
+cv.addEventListener("wheel",e=>{ e.preventDefault(); const sp=pos(e), w=s2w(sp[0],sp[1]), f=e.deltaY<0?1.2:1/1.2; S.view.s*=f;
+  S.view.vx=w[0]-sp[0]/S.view.s; S.view.vy=S.view.yDown?w[1]-sp[1]/S.view.s:w[1]-(S.H-sp[1])/S.view.s; draw(); },{passive:false});
+window.addEventListener("keydown",e=>{
+  if(e.target&&(e.target.tagName==="INPUT"||e.target.tagName==="SELECT")) return;
+  if(e.code==="Space"){ S.spaceDown=true; e.preventDefault(); }
+  else if(e.key==="Enter"){ finishAny(); draw(); }
+  else if(e.key==="Escape"){ if(S.mode==="digitize"){ if(S.active>=0){S.contours.splice(S.active,1);S.active=-1;} if(S.activeTrace>=0){S.traces.splice(S.activeTrace,1);S.activeTrace=-1;} S.calibPick=-1; buildPanel(); } else { S.newFault=null; S.newPoly=null; } draw(); }
+  else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"){ undo(); e.preventDefault(); }
+});
+window.addEventListener("keyup",e=>{ if(e.code==="Space") S.spaceDown=false; });
+window.addEventListener("resize",()=>{ resize(); draw(); });
+
+/* ---------- Streamlit render ---------- */
+function init(args){
+  S.args=args; S.key=args.rev; S.open=(args.mode==="fences"); S.mode=S.open?"polygons":(args.mode||"digitize"); S.tool=S.mode==="digitize"?"line":((S.mode==="polygons"&&!(args.polygons||[]).length)||(S.mode==="faults"&&!(args.faults||[]).length)?"draw":"edit");
+  S.polys=(args.polygons||[]).map(p=>({name:p.name,pts:p.pts.map(q=>[q[0],q[1]])})); S.psel=S.polys.length?0:-1; S.newPoly=null; S.boundary=args.boundary||"";
+  S.extent=args.extent||null; S.wells=args.wells||[]; S.defaults=args.defaults||{};
+  S.img=null; S.imgName=""; S.calibPick=-1; S.calib.forEach(c=>{c.px=null;c.py=null;c.X="";c.Y="";});
+  S.contours=(args.contours||[]).map(c=>({z:c.z,pts:c.pts.map(p=>[p[0],p[1]])})); S.points=(args.points||[]).map(p=>p.slice());
+  S.traces=(args.traces||[]).map(t=>({name:t.name,pts:t.pts.map(p=>[p[0],p[1]])})); S.active=-1; S.activeTrace=-1; S.newFault=null;
+  S.faults=(args.faults||[]).map((f,i)=>Object.assign({color:COLORS[i%COLORS.length],growth:0},f,{trace:f.trace.map(p=>[p[0],p[1]])})); S.sel=S.faults.length?0:-1;
+  S.zVal=args.z_default!=null?args.z_default:2000; S.zStep=0; S.msg="";
+  buildGrid(args.grid||null);
+  buildBar(); resize(); fitView(); helpText(); buildPanel();
+}
+window.addEventListener("message",e=>{
+  if(!e.data||e.data.type!=="streamlit:render") return;
+  const a=e.data.args||{}; setHeight(a.height||640);
+  if(a.rev!==S.key) init(a); // re-initialise only when Python asks for a different editor state
+});
+sl("streamlit:componentReady",{apiVersion:1});
+setHeight(640);
+</script>
+</body>
+</html>
