@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 SPLITS = ["none", "zone", "fault block", "layer", "fluid", "region", "segment"]   # fluid / region / segment need FLUID / REGION / SEGMENT
-MAP_MODES = ["average", "thickness-weighted", "sum", "min", "max"]
+MAP_MODES = ["average", "thickness-weighted", "sum", "min", "max", "bulk-volume-weighted"]
 FLUID_NAMES = {1: "gas", 2: "oil", 3: "water"}
 
 
@@ -26,7 +26,7 @@ def get(props, name, grid):
 def selection(grid, props, filters: Optional[List[dict]] = None, zones: Optional[List[str]] = None, k_range=None) -> np.ndarray:
     """Boolean cell mask: active cells in the chosen zones / layers that pass every filter dict(prop, lo, hi)."""
     m = grid.actnum > 0
-    if zones:
+    if zones is not None:
         zi = [i for i, z in enumerate(grid.zones) if z.name in zones]
         m = m & np.isin(grid.layer_zone, zi)[:, None, None]
     if k_range:
@@ -169,7 +169,11 @@ def layer_profile(grid, props, name, mask, zone_idx: Optional[int] = None) -> di
 def map_2d(grid, props, name, mask, mode="average", weight_props: Optional[Tuple[str, ...]] = ("NTG",)) -> np.ndarray:
     """(nj, ni) map over the selected cells.  thickness-weighted weights each cell by DZ x the weight properties (default NTG)."""
     v = get(props, name, grid)
-    m = mask & np.isfinite(v)
+    if mode not in MAP_MODES:
+        raise AnalysisError(f"Unknown map aggregation: {mode}")
+    if props[name].stale:
+        raise AnalysisError(f"Property '{name}' is stale. Rebuild it before generating maps.")
+    m = mask & (grid.actnum > 0) & np.isfinite(v)
     if mode == "sum":
         out = np.where(m, v, 0.0).sum(axis=0)
     elif mode in ("min", "max"):
@@ -184,6 +188,10 @@ def map_2d(grid, props, name, mask, mode="average", weight_props: Optional[Tuple
             for wn in weight_props or ():
                 if wn in props:
                     w = w * get(props, wn, grid)
+        elif mode == "bulk-volume-weighted":
+            w = grid.bulk_volume().astype(float)
+        if not np.isfinite(w[m]).all() or (w[m] < 0).any():
+            raise AnalysisError("Map weights must be finite and non-negative in selected cells.")
         w = np.where(m, w, 0.0)
         sw = w.sum(axis=0)
         with np.errstate(invalid="ignore", divide="ignore"):

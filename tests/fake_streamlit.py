@@ -87,6 +87,10 @@ def container(**kw):
     return Ctx()
 
 
+def form(key, **kw):
+    return Ctx()
+
+
 @contextlib.contextmanager
 def spinner(text=""):
     yield
@@ -203,6 +207,7 @@ def declare_component(name, path=None, url=None):
 def install():
     st = types.ModuleType("streamlit")
     for n, f in dict(columns=columns, progress=progress, tabs=tabs, expander=expander, container=container, spinner=spinner,
+                     form=form, form_submit_button=button, color_picker=text_input,
                      button=button, download_button=download_button, text_input=text_input, text_area=text_area, number_input=number_input,
                      selectbox=selectbox, multiselect=multiselect, radio=radio, slider=slider, checkbox=checkbox,
                      file_uploader=file_uploader, data_editor=data_editor, rerun=rerun, set_page_config=set_page_config,

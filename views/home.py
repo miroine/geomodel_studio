@@ -87,14 +87,10 @@ def render():
     banner("Project", title)
 
     stepper([
-        ("Surfaces", "import, digitize, filter", len(p.surfaces) > 0),
-        ("Polygons", "boundary and clip areas", len(p.polygons) > 0),
-        ("Faults", "draw on the map", len(p.faults) > 0),
-        ("Wells + tops", "paths, picks, calibration", len(p.wells) > 0 or not p.tops.empty),
-        ("Structural model", "workflow + QC", p.structure is not None),
-        ("Zones", "layering styles", len(p.zones) > 0),
-        ("3D grid", "corner-point", p.grid is not None),
-        ("Export", "GRDECL / ROFF / VTK", False),
+        ("1 · Inputs", "Maps, faults, wells and picks", bool(p.surfaces or p.faults or p.wells or not p.tops.empty)),
+        ("2 · Structure", "Build and quality-check horizons", p.structure is not None),
+        ("3 · Grid", "Define zones and build cells", p.grid is not None),
+        ("4 · Review", "Inspect, analyze and export", p.grid is not None),
     ])
     n_act = int(p.grid.actnum.sum()) if p.grid else 0
     kpis([("Surfaces", len(p.surfaces)), ("Polygons", len(p.polygons)), ("Faults", len(p.faults)), ("Wells", len(p.wells)),

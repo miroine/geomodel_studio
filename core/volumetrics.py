@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 import numpy as np
+from . import units as un
 
 SW_MODES = ["constant", "property", "satheight"]
 M3_TO_STB = 6.289811
@@ -27,6 +28,11 @@ M3_TO_SCF = 35.31467
 
 class VolError(Exception):
     pass
+
+
+def saturation_height(height, swirr, entry, lam):
+    """Water saturation from height above the FWL, using project depth units."""
+    return swirr + (1.0 - swirr) * (entry / np.maximum(height, entry)) ** lam
 
 
 def default_config(grid) -> dict:
@@ -48,10 +54,11 @@ def default_config(grid) -> dict:
 def check_config(grid, cfg) -> List[str]:
     errs = []
     c = cfg["contacts"]
-    if c["goc"] is not None and c["goc"] > c["owc"]:
+    property_contacts = c.get("owc_prop") or c.get("goc_prop")
+    if not property_contacts and c["goc"] is not None and c["goc"] > c["owc"]:
         errs.append("GOC must be above (shallower than) the OWC.")
     for b, v in c["blocks"].items():
-        if v.get("goc") is not None and v.get("owc") is not None and v["goc"] > v["owc"]:
+        if not property_contacts and v.get("goc") is not None and v.get("owc") is not None and v["goc"] > v["owc"]:
             errs.append(f"Block {b}: GOC must be above the OWC.")
     if cfg["fluid"]["Bo"] <= 0 or cfg["fluid"]["Bg"] <= 0:
         errs.append("Bo and Bg must be positive.")
@@ -100,12 +107,32 @@ def _region_values(grid, props, name):
         return grid.block_array()
     if props is None or name not in props:
         raise VolError(f"Region property '{name}' (used for region contacts) is not available - create it on the Properties page (Planes & regions).")
-    return np.rint(props[name].values).astype(int)
+    prop = props[name]
+    active = grid.actnum > 0
+    if prop.stale or prop.values.shape != active.shape or prop.kind != "discrete":
+        raise VolError(f"Contact region property '{name}' must be current, discrete and fit the grid.")
+    values = prop.values[active]
+    if not np.isfinite(values).all() or not np.equal(values, np.rint(values)).all():
+        raise VolError(f"Contact region property '{name}' must have finite integer codes in active cells.")
+    return np.rint(np.where(active, prop.values, 0)).astype(int)
+
+
+def _contact_property(grid, props, name):
+    prop = (props or {}).get(name)
+    if prop is None or prop.stale or prop.values.shape != grid.actnum.shape:
+        raise VolError(f"Contact-depth property '{name}' is missing, stale or does not fit the grid.")
+    if prop.kind != "continuous" or not np.isfinite(prop.values[grid.actnum > 0]).all():
+        raise VolError(f"Contact-depth property '{name}' must be continuous and finite in active cells.")
+    if prop.unit and prop.unit not in un.LENGTH:
+        raise VolError(f"Contact-depth property '{name}' must use a length unit or the project depth unit (blank).")
+    factor = un.factor(prop.unit, un.z()) if prop.unit else 1.0
+    return prop.values.astype(float) * factor
 
 
 def contact_cubes(grid, cfg, props=None, over=None):
     """3D OWC, GOC (NaN = no gas cap) and FWL for every cell: global value -> per fault block -> per region value (zone / segment / any discrete
-    property) -> tilt plane -> scenario shifts.  ``over``: owc_all (one flat OWC everywhere), owc_shift, struct_field (nj, ni)."""
+    property) -> tilt plane -> optional contact-depth properties -> scenario shifts.
+    ``over``: owc_all (flat OWC, bypasses spatial sources), owc_shift, struct_field (nj, ni)."""
     over = over or {}
     shape = (grid.nk, grid.nj, grid.ni)
     o2, g2 = contact_maps(grid, cfg, dict(owc_all=over.get("owc_all")))
@@ -128,13 +155,29 @@ def contact_cubes(grid, cfg, props=None, over=None):
             plane = float(t.get("gx", 0.0)) * (X - float(t.get("xref", 0.0))) + float(t.get("gy", 0.0)) * (Y - float(t.get("yref", 0.0)))
             owc = owc + plane[None]
             goc = goc + plane[None]
+        if c.get("owc_prop"):
+            owc = _contact_property(grid, props, c["owc_prop"])
+        if c.get("goc_prop"):
+            goc = _contact_property(grid, props, c["goc_prop"])
     sh = float(over.get("owc_shift", 0.0))
     owc = owc + sh
     goc = goc + sh
     if over.get("struct_field") is not None:
         owc = owc + over["struct_field"][None]
         goc = goc + over["struct_field"][None]
-    return owc, goc, owc + float(c.get("fwl_below", 0.0))
+    if c.get("owc_prop") or c.get("goc_prop"):
+        active = grid.actnum > 0
+        if (np.isinf(goc[active])).any() or not np.isfinite(owc[active]).all():
+            raise VolError("Contact depths must be finite; undefined GOC means no gas cap.")
+        if (np.isfinite(goc[active]) & (goc[active] > owc[active])).any():
+            raise VolError("GOC must be above (shallower than) the OWC in every active cell.")
+    try:
+        fwl_below = float(c.get("fwl_below", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise VolError("FWL below OWC must be a finite, non-negative height.") from exc
+    if not np.isfinite(fwl_below) or fwl_below < 0:
+        raise VolError("FWL below OWC must be a finite, non-negative height.")
+    return owc, goc, owc + fwl_below
 
 
 FLUID_LEGEND = {"1": "gas", "2": "oil", "3": "water"}
@@ -183,7 +226,7 @@ def compute(grid, cfg, props, vol_to_m3=1.0, over: Optional[dict] = None, ridx: 
     else:
         hc = np.maximum(fwl - centre, 0.0)
         ent = max(float(sc["entry"]), 1e-9)
-        sw = np.clip(sc["swirr"] + (1.0 - sc["swirr"]) * (ent / np.maximum(hc, ent)) ** float(sc["lam"]), 0.0, 1.0)
+        sw = np.clip(saturation_height(hc, sc["swirr"], ent, float(sc["lam"])), 0.0, 1.0)
     sw = np.clip(sw * float(over.get("sw_mult", 1.0)), 0.0, 1.0)
     cut = cfg["cut"]
     net = (phi >= cut["phi"]) & (ntg >= cut["ntg"]) & (sw <= cut["sw"])

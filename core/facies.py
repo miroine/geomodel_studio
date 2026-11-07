@@ -4,14 +4,15 @@
   facies proportions.  Facies are *ordered* as in the table (neighbouring facies in the table are neighbours in space).  Proportions may change
   linearly from the top to the base of each zone (vertical proportion trend).  Well data (a blocked discrete facies log) condition the field by
   kriging, with the data score placed in the middle of the facies' probability interval, and are then honoured exactly.
-* **Objects**: ellipsoidal bodies (length x width x thickness, azimuth) of the object facies are dropped into a background facies until the target
-  volume fraction of the zone is reached.  Not conditioned to wells.
+* **Objects**: ellipsoids or fluvial channels (parametric meanders or digitized open centerlines) are placed in a background facies
+  toward each zone's target volume fraction. Not conditioned to wells.
 * **Petrophysics from facies**: PORO, PERMX/Y/Z and NTG drawn per facies (mean / sd, log10 permeability, correlation), with spatial continuity
   from the zone variograms.
 """
 from __future__ import annotations
 
 from typing import Dict, List, Optional
+import uuid
 
 import numpy as np
 from scipy.special import ndtri
@@ -51,6 +52,12 @@ def normalise(cfg: dict, grid) -> dict:
     d = default_config(grid, len(cfg["facies"]))
     for k in ("vol_weight", "rule", "nmax"):
         cfg.setdefault(k, d[k])
+    for obj in cfg.get("objects", []):
+        obj.setdefault("id", uuid.uuid4().hex[:12])
+        obj.setdefault("shape", "ellipsoid")
+        obj.setdefault("amplitude", 200.0)
+        obj.setdefault("wavelength", 800.0)
+        obj.setdefault("centerline", [])
     for z in cfg["zones"]:
         for k in ("major2", "minor2", "vert2", "azimuth2"):
             z.setdefault(k, d["zones"][0][k])
@@ -103,7 +110,37 @@ def check_config(cfg: dict, grid) -> List[str]:
                 errs.append("Object facies must be in the table and different from the background.")
             if min(o["length"], o["width"], o["thickness"]) <= 0:
                 errs.append("Object dimensions must be > 0.")
+            shape = o.get("shape", "ellipsoid")
+            if shape not in ("ellipsoid", "channel", "digitized_channel"):
+                errs.append("Unknown object shape.")
+            for key in ("length", "width", "thickness", "azimuth"):
+                if not np.isfinite(o[key]):
+                    errs.append(f"Object {key} must be finite.")
+            if shape == "channel":
+                if not np.isfinite(o.get("amplitude", 200.0)) or o.get("amplitude", 200.0) < 0:
+                    errs.append("Channel amplitude must be finite and non-negative.")
+                if not np.isfinite(o.get("wavelength", 800.0)) or o.get("wavelength", 800.0) <= 0:
+                    errs.append("Channel wavelength must be finite and > 0.")
+            if shape == "digitized_channel":
+                pts = np.asarray(o.get("centerline", []), float)
+                if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 2 or not np.isfinite(pts).all():
+                    errs.append("Digitized channels require at least two finite XY centerline vertices.")
+                elif not (np.linalg.norm(np.diff(pts, axis=0), axis=1) > 0).any():
+                    errs.append("Channel centerline must contain distinct vertices.")
     return errs
+
+
+def channel_distance(u, v, points):
+    """Shortest plan-view distance to an open polyline, including its end caps."""
+    distance2 = np.full(np.broadcast_shapes(np.shape(u), np.shape(v)), np.inf)
+    for start, end in zip(points[:-1], points[1:]):
+        du, dv = end - start
+        norm = du * du + dv * dv
+        if norm == 0:
+            continue
+        t = np.clip(((u - start[0]) * du + (v - start[1]) * dv) / norm, 0, 1)
+        distance2 = np.minimum(distance2, (u - start[0] - t * du) ** 2 + (v - start[1] - t * dv) ** 2)
+    return np.sqrt(distance2)
 
 
 def _props(z: dict, f: np.ndarray, trend: bool) -> np.ndarray:
@@ -213,15 +250,38 @@ def simulate_objects(grid, cfg: dict, progress=None) -> np.ndarray:
             target = float(p[codes.index(o["code"])]) * tot
             filled = float(vz[out[ks] == o["code"]].sum())
             tries = 0
-            while filled < target and tries < 20000:
+            limit = 20000 if o.get("shape", "ellipsoid") == "ellipsoid" else 2000
+            while filled < target and tries < limit:
                 tries += 1
                 k0, j0, i0 = act[rng.integers(len(act))]
                 L, W, T = (o[a] * np.exp(rng.normal(0, 0.2)) for a in ("length", "width", "thickness"))
                 az = np.deg2rad(gs.rel_angle(o["azimuth"] + rng.normal(0, cfg.get("azimuth_sd", 10.0)), grid.angle))
                 cu, cv, cz = uc[i0], vc[j0], zc[ks[k0], j0, i0]
-                r = 0.5 * max(L, W)
-                jm = (np.abs(vc - cv) <= r + 2 * (vc[1] - vc[0] if len(vc) > 1 else 0))
-                im = (np.abs(uc - cu) <= r + 2 * (uc[1] - uc[0] if len(uc) > 1 else 0))
+                shape = o.get("shape", "ellipsoid")
+                points = None
+                if shape == "channel":
+                    wavelength = o.get("wavelength", 800.0)
+                    spacing = max(min(np.min(np.diff(grid.xs)), np.min(np.diff(grid.ys)), W / 4, wavelength / 32), 1e-6)
+                    count = int(np.ceil(L / spacing)) + 1
+                    if count > 10000:
+                        raise FaciesError("Channel length/wavelength requires too many centerline samples; increase wavelength or reduce length.")
+                    a = np.linspace(-L / 2, L / 2, max(count, 2))
+                    b = o.get("amplitude", 200.0) * np.sin(2 * np.pi * a / wavelength + rng.uniform(0, 2 * np.pi))
+                    points = np.column_stack((cu + a * np.cos(az) - b * np.sin(az),
+                                              cv + a * np.sin(az) + b * np.cos(az)))
+                elif shape == "digitized_channel":
+                    points = np.asarray(o["centerline"], float)
+                    if grid.rotated:
+                        points = points - np.asarray(grid.origin)
+                        ca, sa = np.cos(np.deg2rad(grid.angle)), np.sin(np.deg2rad(grid.angle))
+                        points = points @ np.array([[ca, -sa], [sa, ca]])
+                if points is None:
+                    r = 0.5 * max(L, W)
+                    jm = (np.abs(vc - cv) <= r + 2 * (vc[1] - vc[0] if len(vc) > 1 else 0))
+                    im = (np.abs(uc - cu) <= r + 2 * (uc[1] - uc[0] if len(uc) > 1 else 0))
+                else:
+                    jm = (vc >= points[:, 1].min() - W / 2) & (vc <= points[:, 1].max() + W / 2)
+                    im = (uc >= points[:, 0].min() - W / 2) & (uc <= points[:, 0].max() + W / 2)
                 js, is_ = np.where(jm)[0], np.where(im)[0]
                 if js.size == 0 or is_.size == 0:
                     continue
@@ -229,7 +289,8 @@ def simulate_objects(grid, cfg: dict, progress=None) -> np.ndarray:
                 dv = V[np.ix_(js, is_)] - cv
                 a_ = du * np.cos(az) + dv * np.sin(az)
                 b_ = -du * np.sin(az) + dv * np.cos(az)
-                q = (a_ / (0.5 * L)) ** 2 + (b_ / (0.5 * W)) ** 2
+                q = ((a_ / (0.5 * L)) ** 2 + (b_ / (0.5 * W)) ** 2 if points is None else
+                     (channel_distance(U[np.ix_(js, is_)], V[np.ix_(js, is_)], points) / (W / 2)) ** 2)
                 dzz = (zc[ks][:, js][:, :, is_] - cz) / (0.5 * T)
                 inside = (q[None] + dzz ** 2 <= 1.0) & (vz[:, js][:, :, is_] > 0)
                 sub = out[ks][:, js][:, :, is_]
@@ -241,6 +302,9 @@ def simulate_objects(grid, cfg: dict, progress=None) -> np.ndarray:
                 tmp = out[ks]
                 tmp[np.ix_(np.arange(ks.size), js, is_)] = sub
                 out[ks] = tmp
+            if o.get("shape", "ellipsoid") != "ellipsoid" and filled < target:
+                raise FaciesError(f"Zone {z['zone']}: channel placement reached {filled / tot:.1%}, below target {target / tot:.1%}. "
+                                  "Reduce the target or increase channel width/thickness/coverage.")
         if progress:
             progress((n + 1) / len(cfg["zones"]))
     return out

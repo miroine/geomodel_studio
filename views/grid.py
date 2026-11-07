@@ -162,10 +162,16 @@ def render():
         j0 = c.slider("Cut: start row j", 0, g.nj - 1, 0, key=S.k("g3_j"))
         ve = d.slider("V.E.", 1.0, 20.0, 4.0, 0.5, key=S.k("g3_ve"))
         layer_mask = S.grid_view_layers(g, "g3")
+        mesh = st.checkbox("Black mesh edges", value=False, key=S.k("g3_mesh"))
+        opacity = st.slider("Grid opacity", 0.05, 1.0, 1.0, 0.05, key=S.k("g3_opacity"))
+        from ui import display
+        with st.expander("Edit property colours"):
+            display.colors(p, prop, "g3")
         try:
             sc = S.build_scene(p, surfaces=[], faults=False, polygons=True, wells=True, tops=True, grid=g, prop=prop, i0=i0, j0=j0,
-                               layer_mask=layer_mask)
-            viewer3d(sc, key=S.k("grid3d"), height=660, ve=ve)
+                               layer_mask=layer_mask, grid_opacity=opacity)
+            selection = viewer3d(sc, key=S.k("grid3d"), height=660, ve=ve, mesh=mesh)
+            S.grid_view_inspector(selection, p, "g3")
         except ValueError as e:
             st.warning(str(e))
         st.caption("Drag the cut sliders to open the grid and see layering and fault offsets in the walls of the cut.")

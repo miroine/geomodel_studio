@@ -5,6 +5,7 @@ import streamlit as st
 from core import units as un
 
 from core import interp, io_surfaces
+from core import project as pj
 from core.faults import Fault, next_color
 from core.surface import Surface, synthetic_surface
 from ui import state as S
@@ -12,6 +13,23 @@ from ui import specs
 from ui.components import map_editor, plotly_view, viewer3d
 from ui.theme import banner, kpis, note
 from views import filters as filters_view
+
+
+def _save_surface(p, surface, prefix):
+    st.markdown(f"**Save surface: {surface.name}**")
+    formats = {"IRAP binary": "irap_binary", "IRAP ASCII": "irap_ascii", "XYZ points": "xyz"}
+    label = st.selectbox("Surface file format", list(formats), key=S.k(prefix + "_format"))
+    try:
+        data, extension = io_surfaces.write_surface(surface, formats[label])
+    except ValueError as exc:
+        st.error(f"Could not save surface: {exc}")
+        return
+    filename = surface.name.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    st.download_button("Save surface file", data, file_name=f"{filename}.{extension}",
+                       mime="application/octet-stream" if formats[label] == "irap_binary" else "text/plain",
+                       key=S.k(prefix + "_download"))
+    st.caption(f"Exports the current surface, including applied filters, in project units: "
+               f"XY {un.xy()}, depth {un.z()}, positive down. File formats do not store the project CRS.")
 
 
 def _grid_options(prefix, default_method="min_curvature"):
@@ -76,37 +94,95 @@ def _library(p):
         return
     st.dataframe(S.surface_table(p), hide_index=True)
     names = list(p.surfaces)
+    with st.container(border=True):
+        with_surface = S.pick("Surface to save", names, "lib_save_surface", "surface")
+        _save_surface(p, p.surfaces[with_surface], "lib_save")
+        st.download_button("Save complete project (.gmsz)", pj.to_bytes(p),
+                           file_name=f"{p.name.replace(' ', '_')}.gmsz", mime="application/zip",
+                           key=S.k("lib_save_project"))
+        st.caption("Save the project to preserve all surfaces, raw maps, filter history and digitized contours.")
     c1, c2, c3 = st.columns([3, 1, 1])
     sel = c1.multiselect("Show", names, default=names[:min(3, len(names))], key=S.k("lib_sel", names))
     view = c2.radio("View", ["3D", "Map"], horizontal=True, key=S.k("lib_view"))
     ve = c3.slider("Vertical exaggeration", 1.0, 20.0, 4.0, 0.5, key=S.k("lib_ve")) if view == "3D" else 1.0
+    from ui import display
+    if sel:
+        edit = st.selectbox("Surface display settings", sel, key=S.k("lib_display", sel))
+        with st.expander("Edit surface depth colours"):
+            display.colors(p, edit, "lib", surface=True)
     if sel and S.need_lattice(p):
         if view == "3D":
             sc = S.build_scene(p, surfaces=sel, faults=True, polygons=True, wells=True, tops=False)
             viewer3d(sc, key=S.k("lib3d"), height=620, ve=ve)
         else:
-            z0 = S.lattice_surface(p, sel[0], fill=False)
+            mapped = st.selectbox("Map surface", sel, key=S.k("lib_map_surface", sel))
+            z0 = p.surfaces[mapped].z
             if np.isfinite(z0).any():
-                spec = specs.map_2d(z0, p.lattice, title=sel[0], faults=list(p.faults.values()))
-                spec["data"] += specs._poly_traces(p.polygons, p.boundary)
-                plotly_view(spec, key=S.k("lib2d"), height=560)
-    with st.expander("Rename / delete"):
-        a, b = st.columns(2)
-        old = a.selectbox("Surface", names, key=S.k("ren_sel", names))
-        new = a.text_input("New name", value=old, key=S.k("ren_new"))
-        if a.button("Rename") and new and new != old and new not in p.surfaces:
+                try:
+                    spec = display.surface_map(p, p.surfaces[mapped], "lib", faults=p.faults.values())
+                    spec["data"] += specs._poly_traces(p.polygons, p.boundary)
+                    plotly_view(spec, key=S.k("lib2d"), height=560)
+                except ValueError as exc:
+                    st.error(f"Surface display: {exc}")
+    with st.expander("Manage surfaces"):
+        st.markdown("#### Duplicate with a scalar operation")
+        source = st.selectbox("Source surface", names, key=S.k("lib_dup_source", names))
+        c1, c2 = st.columns(2)
+        new_name = c1.text_input("New surface name", value=f"{source}_copy", key=S.k(f"lib_dup_name_{source}"))
+        scalar_op = c2.selectbox(
+            "Scalar operation",
+            ["Add constant", "Multiply by factor"],
+            key=S.k("lib_dup_op"),
+            help="Positive depth offsets and factors above 1 make the copied surface deeper.",
+        )
+        if scalar_op == "Add constant":
+            value = st.number_input(f"Depth offset ({un.z()})", value=10.0, step=1.0, key=S.k(f"lib_dup_value_{source}_add"))
+            operation = "add"
+        else:
+            value = st.number_input("Multiplier", value=1.01, step=0.01, format="%.4f", key=S.k(f"lib_dup_value_{source}_multiply"))
+            operation = "multiply"
+        if st.button("Create duplicate", type="primary", disabled=not new_name.strip() or new_name in p.surfaces):
+            try:
+                p.duplicate_surface(source, new_name, operation, float(value))
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success(f"Created '{new_name.strip()}' from '{source}'.")
+                st.rerun()
+
+        st.divider()
+        st.markdown("#### Rename or delete")
+        old = st.selectbox("Surface to rename", names, key=S.k("ren_sel", names))
+        new = st.text_input("New name", value=old, key=S.k("ren_new"))
+        if st.button("Rename") and new and new != old and new not in p.surfaces:
             p.rename_surface(old, new)
             for step in p.steps:
-                for key in ("surface",):
-                    if step.get(key) == old:
-                        step[key] = new
+                if step.get("surface") == old:
+                    step["surface"] = new
             p.invalidate()
             st.rerun()
-        d = b.selectbox("Delete", names, key=S.k("del_sel", names))
-        if b.button("Delete surface", type="secondary"):
-            p.delete_surface(d)
-            st.rerun()
-            st.rerun()
+
+        target = st.selectbox("Surface to delete", names, key=S.k("del_sel", names))
+        references = [
+            step for step in p.steps
+            if step.get("surface") == target
+        ]
+        if references:
+            used_by = ", ".join(
+                str(step.get("horizon") or step.get("name") or step.get("type", "workflow step"))
+                for step in references
+            )
+            st.warning(f"'{target}' is used by workflow step(s): {used_by}. Update or remove those steps before deleting it.")
+        confirmed = st.checkbox("Confirm surface deletion", key=S.k(f"delete_surface_confirm_{target}"))
+        if st.button("Delete surface", type="secondary", disabled=bool(references) or not confirmed):
+            try:
+                p.delete_surface(target)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                if S.focus("surface") == target:
+                    st.session_state["focus"] = None
+                st.rerun()
 
 
 def _import(p):
@@ -135,6 +211,7 @@ def _import(p):
                 if st.button("Add to library", key=S.k(f"add_{f.name}"), type="primary"):
                     s.name = name
                     p.put_surface(s)
+                    st.session_state[S.k(f"tmp_import_saved_{f.name}")] = name
                     st.success(f"Added {name}.")
             else:
                 pts = un.scale_points(obj, fxy, fzz)
@@ -147,9 +224,13 @@ def _import(p):
                         s = interp.grid_points(pts, p.lattice, method, name=name, tension=tension, smoothing=smoothing,
                                                max_distance=maxd or None, **gkw)
                         p.put_surface(s)
+                        st.session_state[S.k(f"tmp_import_saved_{f.name}")] = name
                         st.success(f"Gridded {len(pts):,} points -> {name}.")
                     except Exception as e:
                         st.error(str(e))
+            saved = p.surfaces.get(st.session_state.get(S.k(f"tmp_import_saved_{f.name}")))
+            if saved is not None:
+                _save_surface(p, saved, f"import_save_{f.name}")
 
 
 def _digitize(p):
@@ -202,6 +283,7 @@ def _digitize(p):
             st.error(str(e))
     preview = p.surfaces.get(st.session_state.get("tmp_dig_preview"))
     if preview is not None:
+        _save_surface(p, preview, "digitized_save")
         show_boundary = st.checkbox("Show model boundary on gridded map", value=True, key=S.k("dig_boundary"), disabled=not p.boundary)
         spec = specs.map_2d(preview.z, preview.geom, title=preview.name, faults=[])
         if show_boundary and p.boundary in p.polygons:
@@ -244,8 +326,12 @@ def _synthetic(p):
         s = synthetic_surface(p.lattice, name, kind, z0=z0, relief=relief, width_x=wx, width_y=wy, azimuth=az,
                               dip_x=dxs, dip_y=dys, noise=noise)
         p.put_surface(s)
+        st.session_state["tmp_synthetic_preview"] = name
         st.success(f"Created {name}.")
-        plotly_view(specs.map_2d(s.z, p.lattice, title=name, faults=[]), key=S.k("synprev"), height=420)
+    preview = p.surfaces.get(st.session_state.get("tmp_synthetic_preview"))
+    if preview is not None:
+        _save_surface(p, preview, "synthetic_save")
+        plotly_view(specs.map_2d(preview.z, preview.geom, title=preview.name, faults=[]), key=S.k("synprev"), height=420)
 
 
 def render():

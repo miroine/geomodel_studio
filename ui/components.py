@@ -72,14 +72,37 @@ def plotly_view(spec: dict, key: str, height: int = 520):
     _plotly_view(spec=spec, height=height, rev=rev, key=key, default=None)
 
 
-def viewer3d(scene, key: str, height: int = 680, ve: float = 3.0):
+def viewer3d(scene, key: str, height: int = 680, ve: float = 3.0, mesh: bool = False):
     """Interactive WebGL 3D window.  ``scene`` is a ui.scene.Scene; camera / visibility survive reruns
     as long as the scene extent (cam_key) is unchanged."""
     d = scene.to_dict()
     rev = revision([[o["id"], len(o.get("pos", o.get("path", ""))), o.get("color"), o.get("opacity"), o.get("visible", True),
                      hashlib.md5((o.get("pos") or o.get("path") or "").encode()).hexdigest(),
-                     hashlib.md5((o.get("col") or "").encode()).hexdigest(), o.get("tops")] for o in d["objects"]] + [d["bounds"]])
-    _viewer3d(scene=d, rev=rev, cam_key=scene.cam_key, height=height, ve=ve, key=key, default=None)
+                     hashlib.md5((o.get("col") or "").encode()).hexdigest(),
+                     revision([o.get("idx"), o.get("cell_ids"), o.get("cell_values"), o.get("property")]),
+                     o.get("tops")] for o in d["objects"]] + [d["bounds"]])
+    picked = _viewer3d(scene=d, rev=rev, cam_key=scene.cam_key, height=height, ve=ve, mesh=mesh, key=key, default=None)
+    if not isinstance(picked, dict) or picked.get("rev") != rev:
+        return None
+    for obj in d["objects"]:
+        if obj["id"] != picked.get("object_id") or "cell_ids" not in obj:
+            continue
+        import base64
+        ids = np.frombuffer(base64.b64decode(obj["cell_ids"]), dtype=np.uint32)
+        cell = picked.get("cell_id")
+        if not isinstance(cell, int) or isinstance(cell, bool):
+            return None
+        matches = np.flatnonzero(ids == cell)
+        if not len(matches):
+            return None
+        nk, nj, ni = obj["grid_shape"]
+        k0, rem = divmod(cell, ni * nj)
+        j0, i0 = divmod(rem, ni)
+        value = np.frombuffer(base64.b64decode(obj["cell_values"]), dtype=np.float64)[matches[0]]
+        return dict(object_id=obj["id"], cell_id=cell, i=i0 + 1, j=j0 + 1, k=k0 + 1,
+                    property=obj["property"], value=float(value) if np.isfinite(value) else None,
+                    unit=obj.get("property_unit", ""))
+    return None
 
 
 def map_editor(mode: str, key: str, height: int = 660, grid=None, extent=None, faults=None, wells=None,

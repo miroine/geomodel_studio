@@ -38,6 +38,9 @@ class Project:
     facies: dict = field(default_factory=dict)                              # settings of the facies modelling workflow
     upscale: dict = field(default_factory=dict)                             # settings of the upscaling page
     stochastic: dict = field(default_factory=dict)                          # settings of the stochastic property workflow
+    property_models: dict = field(default_factory=dict)                     # zone/facies petrophysics and saturation settings
+    property_jobs: List[dict] = field(default_factory=list)                  # ordered executable property workflow snapshots
+    display_settings: dict = field(default_factory=dict)                    # saved property/surface colour preferences
     digitized: dict = field(default_factory=lambda: dict(contours=[], points=[], faults=[], calib=None))
     polygons: Dict[str, Polygon] = field(default_factory=dict)
     wells: Dict[str, Well] = field(default_factory=dict)
@@ -73,6 +76,29 @@ class Project:
         self.raw[s.name] = s.z.copy()
         self.filters[s.name] = dict(ops=[], undo=[], redo=[])
         self.invalidate()
+
+    def duplicate_surface(self, source: str, name: str, operation: str, value: float):
+        """Create an independent surface from the current source map with a scalar operation."""
+        name = name.strip()
+        if source not in self.surfaces:
+            raise ValueError(f"Unknown source surface: {source}")
+        if not name:
+            raise ValueError("The new surface name cannot be empty.")
+        if name in self.surfaces:
+            raise ValueError(f"A surface named '{name}' already exists.")
+        if not np.isfinite(value):
+            raise ValueError("The scalar value must be finite.")
+
+        source_surface = self.surfaces[source]
+        if operation == "add":
+            z = source_surface.z.copy() + value
+        elif operation == "multiply":
+            z = source_surface.z.copy() * value
+        else:
+            raise ValueError(f"Unknown scalar operation: {operation}")
+        if np.isinf(z).any():
+            raise ValueError("The scalar operation produced infinite depth values.")
+        self.put_surface(Surface(name, source_surface.geom, z, source=f"scalar:{operation}:{source}"))
 
     def fstate(self, name: str) -> dict:
         if name not in self.raw:
@@ -126,10 +152,23 @@ class Project:
         for d in (self.raw, self.filters):
             if old in d:
                 d[new] = d.pop(old)
+        displays = self.display_settings.get("surfaces", {})
+        if old in displays:
+            displays[new] = displays.pop(old)
 
     def delete_surface(self, name: str):
+        if name not in self.surfaces:
+            return
+        references = [step for step in self.steps if step.get("surface") == name]
+        if references:
+            uses = ", ".join(
+                str(step.get("horizon") or step.get("name") or step.get("type", "workflow step"))
+                for step in references
+            )
+            raise ValueError(f"Surface '{name}' is used by workflow step(s): {uses}.")
         for d in (self.surfaces, self.raw, self.filters):
             d.pop(name, None)
+        self.display_settings.get("surfaces", {}).pop(name, None)
         self.invalidate()
 
     def boundary_poly(self) -> Optional[Polygon]:
@@ -157,6 +196,9 @@ def to_bytes(p: Project) -> bytes:
         polygons=[v.to_dict() for v in p.polygons.values()], fences=[v.to_dict() for v in p.fences.values()], wells=[w.to_dict() for w in p.wells.values()],
         boundary=p.boundary, filters={n: p.filters.get(n, dict(ops=[], undo=[], redo=[])) for n in p.surfaces},
         filter_presets=p.filter_presets, crs=p.crs, properties=[v.meta() for v in p.properties.values()], stochastic=p.stochastic, volumetrics=p.volumetrics, fault_mult=p.fault_mult, upscale=p.upscale, facies=p.facies,
+        property_models=p.property_models,
+        property_jobs=p.property_jobs,
+        display_settings=p.display_settings,
         logs={w: dict(curves=list(l["curves"]), units=l.get("units", {})) for w, l in p.logs.items()},
     )
     buf = io.BytesIO()
@@ -215,6 +257,9 @@ def from_bytes(data: bytes) -> Project:
     p.fault_mult = meta.get("fault_mult", {}) or {}
     p.upscale = meta.get("upscale", {}) or {}
     p.facies = meta.get("facies", {}) or {}
+    p.property_models = meta.get("property_models", {}) or {}
+    p.property_jobs = meta.get("property_jobs", []) or []
+    p.display_settings = meta.get("display_settings", {}) or {}
     if ldata is not None and meta.get("logs"):
         ln = np.load(io.BytesIO(ldata))
         for wi, (w, d) in enumerate(meta["logs"].items()):

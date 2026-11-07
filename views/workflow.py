@@ -1,4 +1,6 @@
 """Structural model: ordered workflow of steps, run, QC (3D, maps, cross-sections)."""
+from html import escape
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -6,6 +8,7 @@ from core import units as un
 
 from core import extrap, interp, fence as fc
 from core.polygons import Polygon
+from core.surface import Surface
 from core.workflow import (ROLES, STEP_TYPES, FILL_MODES, ZONE_MODES, WorkflowError, describe, run_workflow, tops_misfit, layer_fractions,
                            zone_qc, zonespecs_from_structure)
 from ui import state as S
@@ -17,11 +20,61 @@ TYPE_LABEL = {"zone": "Zone (modelled separately)", "surface": "Horizon from sur
               "smooth": "Smooth horizon", "faults": "Apply faults",
               "proportional": "Horizon between two horizons (proportional)", "layers": "Layers between two horizons", "clip": "Clip horizon to a depth window"}
 METHODS = ["shift"] + [m for m in interp.METHODS if m != "nearest"]
+TASK_GROUPS = {
+    "surface": ("Horizon construction", "construction"),
+    "isochore": ("Horizon construction", "construction"),
+    "proportional": ("Horizon construction", "construction"),
+    "zone": ("Zones & layering", "layering"),
+    "layers": ("Zones & layering", "layering"),
+    "calibrate": ("Well conditioning", "conditioning"),
+    "smooth": ("Horizon refinement", "refinement"),
+    "clip": ("Horizon refinement", "refinement"),
+    "faults": ("Fault framework", "faults"),
+}
+
+
+def _task_io(step):
+    """Show data dependencies without implying that the ordered workflow is a branching graph."""
+    kind = step["type"]
+    if kind == "surface":
+        return f"Library surface: {step.get('surface') or 'not selected'}", step.get("horizon") or "Unnamed horizon"
+    if kind == "isochore":
+        source = f"Horizon: {step.get('ref') or 'not selected'}"
+        thickness = (f"map {step.get('surface') or 'not selected'}" if step.get("mode", "constant") == "map"
+                     else f"{step.get('thickness', 50):g} {un.z()}")
+        return f"{source} + thickness {thickness}", step.get("horizon") or "Unnamed horizon"
+    if kind == "proportional":
+        return f"{step.get('top') or 'Top not selected'} + {step.get('base') or 'Base not selected'}", step.get("horizon") or "Unnamed horizon"
+    if kind == "zone":
+        return f"Top: {step.get('top') or 'not selected'}", f"{step.get('name') or 'Unnamed zone'} / base: {step.get('horizon') or 'not named'}"
+    if kind == "layers":
+        return f"{step.get('top') or 'Top not selected'} + {step.get('base') or 'Base not selected'}", f"Intermediate horizons: {step.get('prefix') or 'Layer'}"
+    if kind == "faults":
+        return ", ".join(step.get("faults", [])) or "No active faults", "Fault displacement applied to the framework"
+    horizon = step.get("horizon") or "Horizon not selected"
+    if kind == "calibrate":
+        return f"{horizon} + well tops: {step.get('label') or horizon}", f"Conditioned horizon: {horizon}"
+    return horizon, f"Refined horizon: {horizon}"
+
+
+def _task_card(step, number):
+    group, style = TASK_GROUPS[step["type"]]
+    source, output = _task_io(step)
+    st.markdown(
+        f'<div class="workflow-node workflow-{style}">'
+        f'<div class="workflow-number">{number:02d}</div><div class="workflow-content">'
+        f'<div class="workflow-category">{escape(group)}</div>'
+        f'<div class="workflow-title">{escape(TYPE_LABEL[step["type"]])}</div>'
+        f'<div class="workflow-io"><b>IN</b> {escape(source)}</div>'
+        f'<div class="workflow-io"><b>OUT</b> {escape(output)}</div></div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _extension(out, d, kk):
     """How a map is brought onto the model lattice and extended beyond its own coverage."""
-    with st.expander("Interpolation onto the model lattice and extension beyond the map", expanded=False):
+    with st.container(border=True):
+        st.markdown("**Interpolation onto the model lattice and extension beyond the map**")
         c1, c2 = st.columns(2)
         out["resample"] = c1.selectbox("Resample map", ["linear", "cubic"], index=_idx(["linear", "cubic"], d.get("resample", "linear")), key=kk("rs"),
                                        help="Bilinear never overshoots; cubic is smoother when the lattice is finer than the map.")
@@ -244,31 +297,41 @@ def _steps_ui(p):
     changed = False
     for i, s in enumerate(p.steps):
         uid = s["_id"]
-        c0, c1, c2, c3, c4 = st.columns([0.5, 9, 0.6, 0.6, 0.6])
-        c0.markdown(f"**{i + 1}**")
-        c1.markdown(describe(s))
-        if c2.button("▲", key=S.k(f"up{uid}"), disabled=i == 0):
-            p.steps[i - 1], p.steps[i] = p.steps[i], p.steps[i - 1]
-            changed = True
-        if c3.button("▼", key=S.k(f"dn{uid}"), disabled=i == len(p.steps) - 1):
-            p.steps[i + 1], p.steps[i] = p.steps[i], p.steps[i + 1]
-            changed = True
-        if c4.button("✕", key=S.k(f"rm{uid}")):
-            p.steps.pop(i)
-            changed = True
+        if i:
+            st.markdown('<div class="workflow-connector" aria-label="Next task">&#8595;</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            _task_card(s, i + 1)
+            st.markdown(describe(s))
+            c1, c2, c3 = st.columns(3)
+            if c1.button("Move up", key=S.k(f"up{uid}"), disabled=i == 0, use_container_width=True):
+                p.steps[i - 1], p.steps[i] = p.steps[i], p.steps[i - 1]
+                changed = True
+            if c2.button("Move down", key=S.k(f"dn{uid}"), disabled=i == len(p.steps) - 1, use_container_width=True):
+                p.steps[i + 1], p.steps[i] = p.steps[i], p.steps[i + 1]
+                changed = True
+            if c3.button("Delete task", key=S.k(f"rm{uid}"), use_container_width=True):
+                p.steps.pop(i)
+                changed = True
+            if not changed:
+                with st.expander(f"Configure task {i + 1:02d} - {TYPE_LABEL[s['type']]}", expanded=False):
+                    new = step_form(s["type"], s, uid, p)
+                    if st.button("Update step", key=S.k(f"upd{uid}")):
+                        s.update(new)
+                        changed = True
         if changed:
             break
-        with st.expander("edit", expanded=False):
-            new = step_form(s["type"], s, uid, p)
-            if st.button("Update step", key=S.k(f"upd{uid}")):
-                s.update(new)
-                changed = True
     if changed:
         p.invalidate()
         st.rerun()
+    if p.steps:
+        st.markdown('<div class="workflow-connector" aria-label="Build framework">&#8595;</div>'
+                    '<div class="workflow-output"><b>Structural framework</b><br>'
+                    'Run workflow to build horizons, then review 3D, maps, sections and zone QC.</div>', unsafe_allow_html=True)
 
-    st.markdown("##### Add a step")
-    kind = st.selectbox("Step type", STEP_TYPES, format_func=lambda x: TYPE_LABEL[x], key=S.k("new_kind"))
+
+def _add_step_ui(p):
+    st.markdown("##### Add a task")
+    kind = st.selectbox("Step type", STEP_TYPES, format_func=lambda x: f"{TASK_GROUPS[x][0]} / {TYPE_LABEL[x]}", key=S.k("new_kind"))
     if kind in ("surface", "isochore") and not p.surfaces:
         st.warning("Add surfaces to the library first.")
         return
@@ -416,7 +479,10 @@ def _results(p):
                                   help="Shows the cross-section along the fence as a coloured vertical curtain in the 3D window.")
         if sel or fsel:
             items = [(h, Z[st_.names.index(h)]) for h in sel] or [(st_.names[0], Z[0])]
-            sc = S.scene_from_arrays(p, items, faults=st_.faults if showf else None, polygons=True, wells=True, tops=True)
+            sc = S.scene_from_arrays(p, items, faults=st_.faults if showf else None, polygons=True, wells=True, tops=True,
+                                     fault_cuts=st_.faults, fault_references=st_.base)
+            st.caption("Faulted horizons are split at fault crossings so the throw is not bridged by sloping triangles. "
+                       "The display gap follows mesh resolution; fault-plane visibility does not change the horizon offsets.")
             if not sel:
                 for o in list(sc.objects):
                     if o.get("group") == "Surfaces":
@@ -433,7 +499,15 @@ def _results(p):
         Zm = st_.lattice_depths(with_faults=(wf == "Faulted"))
         if choice.startswith("Depth"):
             h = choice[8:]
-            spec = specs.map_2d(Zm[st_.names.index(h)], g, title=h, faults=st_.faults, wells=S.wells_for_plot(p.tops, h, False))
+            from ui import display
+            with st.expander("Edit surface depth colours"):
+                display.colors(p, h, "r2", surface=True)
+            try:
+                spec = display.surface_map(p, Surface(h, g, Zm[st_.names.index(h)]), "r2",
+                                           faults=st_.faults, wells=S.wells_for_plot(p.tops, h, False))
+            except ValueError as exc:
+                st.error(f"Surface display: {exc}")
+                return
         else:
             k = opts.index(choice) - len(st_.names)
             spec = specs.map_2d(np.diff(Zm, axis=0)[k], g, title=choice, scale=specs.THICK_SCALE, colorbar=f"Thickness ({un.z()})", faults=st_.faults)
@@ -475,26 +549,38 @@ def render():
             if p.structure else "Assemble the framework: an ordered workflow of horizons, isochores, calibration and faults"))
     if not S.need_lattice(p):
         return
-    left, right = st.columns([5, 4], gap="large")
+    st.markdown("### Structural workflow")
+    st.caption("Follow the arrows from top to bottom. Each task shows its inputs, output and configuration. "
+               "Colors identify task families, not execution status.")
+    groups = dict(TASK_GROUPS.values())
+    st.markdown('<div class="workflow-legend">' + "".join(
+        f'<span class="workflow-{style}">{escape(group)}</span>' for group, style in groups.items()
+    ) + '</div>', unsafe_allow_html=True)
+    left, right = st.columns([3, 2], gap="large")
     with left:
-        st.subheader("Workflow")
         _steps_ui(p)
     with right:
-        st.subheader("Run")
-        note("Steps run top to bottom. Calibration residuals are computed against the <b>faulted</b> model and interpolated smoothly "
-             "on the unfaulted base, so a correction never smears across a fault. Horizons are ordered by mean depth and can never cross.")
-        if st.button("Run workflow", type="primary", disabled=not p.steps):
-            try:
-                with st.spinner("Building the structural framework..."):
-                    p.structure = run_workflow(p.steps, p.surfaces, p.faults, p.tops, p.lattice)
-                    p.grid = None
-                st.success(f"Framework built: {len(p.structure.names)} horizons.")
-            except WorkflowError as e:
-                st.error(str(e))
-                p.structure = None
-        if p.structure is not None:
-            for q in p.structure.calib_qc:
-                st.markdown(f"**{q['horizon']}** calibrated to {q['n']} tops: RMS {q['rms_before']:.1f} {un.z()} -> {q['rms_after']:.2f} {un.z()}")
+        with st.container(border=True):
+            st.subheader("Build & validate")
+            note("Tasks execute in list order. <b>Apply faults</b> selects faults for the whole framework, including calibration; "
+                 "it is not a local operation on just the next horizon. Define input horizons before tasks that use them.")
+            if st.button("Run workflow", type="primary", disabled=not p.steps, use_container_width=True):
+                try:
+                    with st.spinner("Building the structural framework..."):
+                        p.structure = run_workflow(p.steps, p.surfaces, p.faults, p.tops, p.lattice)
+                        p.grid = None
+                    st.success(f"Framework built: {len(p.structure.names)} horizons.")
+                except WorkflowError as e:
+                    st.error(str(e))
+                    p.structure = None
+            st.caption("Framework built" if p.structure is not None else "Not built - run after configuring or changing tasks.")
+            if p.structure is not None:
+                for q in p.structure.calib_qc:
+                    st.markdown(f"**{q['horizon']}** calibrated to {q['n']} tops: RMS {q['rms_before']:.1f} {un.z()} -> {q['rms_after']:.2f} {un.z()}")
+            st.caption("Calibration uses the faulted model without smoothing corrections across faults. "
+                       "Final horizons are ordered by mean depth and cannot cross.")
+        with st.container(border=True):
+            _add_step_ui(p)
     if p.structure is not None:
         st.divider()
         _results(p)

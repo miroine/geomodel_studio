@@ -9,7 +9,7 @@ from core.surface import Geometry
 from core.faults import Fault
 from .theme import NAVY, BLUE, CYAN, INK, MUTE, LINE, PALETTE, ZONE_COLORS
 
-DEPTH_SCALE = [[0.0, "#E6F3FD"], [0.2, "#8EC5EE"], [0.4, "#3C86DB"], [0.6, "#1D4FB0"], [0.8, "#0B2A6B"], [1.0, "#051C2C"]]
+DEPTH_SCALE = [[0., "#D7191C"], [0.25, "#FDAE61"], [0.5, "#FFFFBF"], [0.75, "#ABD9E9"], [1., "#2C7BB6"]]
 THICK_SCALE = [[0.0, "#FFFFFF"], [0.25, "#CFE3F7"], [0.5, "#5E9BE0"], [0.75, "#2251FF"], [1.0, "#051C2C"]]
 RES_SCALE = [[0.0, "#D7263D"], [0.5, "#F5F8FC"], [1.0, "#2251FF"]]
 FONT = dict(family="Arial, Helvetica, sans-serif", color=INK, size=12)
@@ -35,14 +35,33 @@ def base_layout(title=None, **kw):
 
 
 def map_2d(Z, geom: Geometry, title=None, scale=DEPTH_SCALE, faults: Optional[List[Fault]] = None, wells=None,
-           colorbar=None, contour_lines=True, zmid=None, reverse=False, line_color="#FFFFFF"):
+           colorbar=None, contour_lines=True, zmid=None, reverse=False, line_color="#333333",
+           contour_interval=0., contour_labels=False, well_paths=None):
     colorbar = colorbar or f"Depth ({un.z()})"
     z = _nan(Z)
+    if geom.rotation:
+        from core.surface import Surface
+        x0, x1, y0, y1 = geom.bounds()
+        step = max(min(abs(geom.xinc), abs(geom.yinc)), np.sqrt((x1 - x0) * (y1 - y0) / 140_000))
+        nx, ny = max(2, int(np.ceil((x1 - x0) / step)) + 1), max(2, int(np.ceil((y1 - y0) / step)) + 1)
+        target = Geometry(x0, y0, (x1 - x0) / (nx - 1), (y1 - y0) / (ny - 1), nx, ny)
+        z = Surface("Map", geom, z).resample_to(target, extrapolate=False).z
+        geom = target
+    if not np.isfinite(z).any():
+        raise ValueError("The surface has no finite depths to display.")
+    if not np.isfinite(contour_interval) or contour_interval < 0:
+        raise ValueError("Contour interval must be finite and non-negative.")
     lo, hi = float(np.nanmin(z)), float(np.nanmax(z))
     tr = dict(type="contour", x=geom.xs, y=geom.ys, z=z, colorscale=scale, connectgaps=False,
-              contours=dict(coloring="heatmap", showlines=contour_lines),
+              contours=dict(coloring="heatmap", showlines=contour_lines, showlabels=contour_labels),
               line=dict(width=0.6, color=line_color), colorbar=dict(title=colorbar, len=0.8, thickness=12),
               ncontours=18, hovertemplate="x %{x:.0f}<br>y %{y:.0f}<br>%{z:.1f}<extra></extra>")
+    tr["reversescale"] = reverse
+    if contour_interval > 0:
+        if (hi - lo) / contour_interval > 500:
+            raise ValueError("Contour interval would create more than 500 contours; increase it.")
+        tr.update(autocontour=False)
+        tr["contours"].update(start=np.ceil(lo / contour_interval) * contour_interval, end=hi, size=contour_interval)
     if zmid is not None:
         d = max(abs(lo - zmid), abs(hi - zmid), 1e-9)
         tr.update(zmin=zmid - d, zmax=zmid + d, zmid=zmid)
@@ -56,6 +75,17 @@ def map_2d(Z, geom: Geometry, title=None, scale=DEPTH_SCALE, faults: Optional[Li
                          text=[w.get("label", "") for w in wells], textposition="top right",
                          marker=dict(symbol="triangle-up", size=10, color=NAVY, line=dict(color="#fff", width=1)),
                          name="Wells", textfont=dict(size=10)))
+    from core.wells import trajectory
+    for well in well_paths or []:
+        path = trajectory(well)
+        if not np.isfinite(path).all():
+            raise ValueError(f"Well '{well.name}' has non-finite trajectory coordinates.")
+        data.append(dict(type="scatter", mode="lines", x=path[:, 0], y=path[:, 1], customdata=path[:, 2],
+                         line=dict(color=well.color or NAVY, width=2.5), name=well.name,
+                         hovertemplate=well.name + "<br>x %{x:.1f}<br>y %{y:.1f}<br>depth %{customdata:.1f}<extra></extra>"))
+        data.append(dict(type="scatter", mode="markers+text", x=[well.x], y=[well.y], text=[well.name],
+                         textposition="top right", marker=dict(size=8, symbol="triangle-up", color=well.color or NAVY),
+                         name=f"{well.name} head", showlegend=False))
     lay = base_layout(title, xaxis=dict(title="Easting", scaleanchor="y", scaleratio=1, showgrid=False),
                       yaxis=dict(title="Northing", showgrid=False))
     return dict(data=data, layout=lay)
@@ -256,19 +286,33 @@ def property_section(panels, title=None, ve=None, show_contacts=True, show_fault
             lay["yaxis" + sfx] = dict(domain=dom, autorange="reversed")
             lay["xaxis" + sfx] = dict(anchor="y" + sfx)
             continue
-        idx, bk, vmin, vmax = gs.colour_buckets(sec["v"], pan.get("discrete", False), vmin=pan.get("vmin"), vmax=pan.get("vmax"), stops=stops)
+        scale = pan.get("scale")
+        if scale and scale["kind"] == "discrete":
+            codes = scale.get("codes", np.arange(len(scale["colors"])) + scale["first"])
+            idx = np.searchsorted(codes, sec["v"])
+            bk = [(code, code, color) for code, color in zip(codes, scale["colors"])]
+            vmin, vmax = -0.5, len(codes) - 0.5
+            color_values = idx
+            cs = [[v, c] for i, c in enumerate(scale["colors"])
+                  for v in (i / len(codes), (i + 1) / len(codes))]
+        else:
+            color_values = scale["values"].ravel()[sec["cell_ids"]] if scale else sec["v"]
+            idx, bk, vmin, vmax = gs.colour_buckets(color_values, pan.get("discrete", False),
+                vmin=scale["vmin"] if scale else pan.get("vmin"), vmax=scale["vmax"] if scale else pan.get("vmax"), stops=stops)
+            cs = [[i / (len(stops) - 1), c] for i, c in enumerate(stops)]
         for b, (lo, hi, col) in enumerate(bk):
             m = idx == b
             if m.any():
                 data.append(_poly_trace(sec["x"][m], sec["z"][m], col, pan["name"], ids))
         cx, cz, cv = sec["x"].mean(axis=1), sec["z"].mean(axis=1), sec["v"]
         step = max(1, len(cv) // max_hover)
-        cs = [[i / (len(stops) - 1), c] for i, c in enumerate(stops)]
         data.append(dict(type="scatter", mode="markers", x=cx[::step], y=cz[::step], showlegend=False, **ids,
-                         marker=dict(size=5, opacity=0.0, color=cv[::step], colorscale=cs, cmin=vmin, cmax=vmax, showscale=True,
+                         marker=dict(size=5, opacity=0.0, color=color_values[::step], colorscale=cs, cmin=vmin, cmax=vmax, showscale=True,
                                      colorbar=dict(title=dict(text=f"{pan['name']}" + (f" ({pan['unit']})" if pan.get("unit") else ""), font=dict(size=11)),
                                                    len=h * 0.95, y=(dom[0] + dom[1]) / 2, yanchor="middle", thickness=12)),
                          text=[f"{pan['name']} = {v:.4g}" for v in cv[::step]], hovertemplate="%{text}<br>depth %{y:.1f}<extra></extra>"))
+        if scale and scale["kind"] == "discrete":
+            data[-1]["marker"]["colorbar"].update(tickvals=list(range(len(codes))), ticktext=[str(c) for c in codes])
         if show_contacts:
             for nme, c in sec["contacts"].items():
                 xs, zs = [], []

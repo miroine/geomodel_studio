@@ -211,8 +211,8 @@ class CPGrid:
 
     # ---- exterior faces for 3D display -------------------------------
     def exterior_faces(self, i0=0, j0=0, scalar: Optional[np.ndarray] = None, max_faces=120_000,
-                       layer_mask: Optional[np.ndarray] = None):
-        """Triangulated outer skin of displayed active cells in the sub-block [i0:, j0:]."""
+                       layer_mask: Optional[np.ndarray] = None, return_cell_ids=False):
+        """Outer skin; optionally append original C-order cell IDs, one per triangle."""
         act = self.actnum[:, j0:, i0:].astype(bool)
         if layer_mask is not None:
             layer_mask = np.asarray(layer_mask, dtype=bool)
@@ -244,7 +244,7 @@ class CPGrid:
         if total > max_faces:
             raise ValueError(f"{total:,} faces to draw (limit {max_faces:,}); cut the model with the I/J sliders "
                              "or build a coarser grid.")
-        V, T, S = [], [], []
+        V, T, S, cell_ids = [], [], [], []
         base = 0
         for name, (mask, corners) in spec.items():
             idx = np.argwhere(mask)
@@ -263,10 +263,14 @@ class CPGrid:
             T.append(tri)
             if scalar is not None:
                 S.append(np.tile(scalar[k, j, i], 2))
+            if return_cell_ids:
+                cell_ids.append(np.tile((k * self.nj + j) * self.ni + i, 2))
             base += n * 4
         if not V:
-            return np.zeros((0, 3)), np.zeros((0, 3), int), np.zeros(0)
-        return np.vstack(V), np.vstack(T), (np.concatenate(S) if scalar is not None else np.zeros(0))
+            result = (np.zeros((0, 3)), np.zeros((0, 3), int), np.zeros(0))
+            return result + (np.zeros(0, dtype=np.uint32),) if return_cell_ids else result
+        result = (np.vstack(V), np.vstack(T), (np.concatenate(S) if scalar is not None else np.zeros(0)))
+        return result + (np.concatenate(cell_ids).astype(np.uint32),) if return_cell_ids else result
 
 
 # ---------------------------------------------------------------------------

@@ -247,6 +247,33 @@ _STEP_Z = ("shift", "thickness", "zmin", "zmax", "fill_value", "tmin", "tmax")
 _STEP_XY = ("radius", "fill_length", "vrange")
 
 
+def _scale_contacts(c, fx, fz):
+    for contact in [c] + list(c.get("blocks", {}).values()) + list((c.get("regions") or {}).get("values", {}).values()):
+        for key in ("owc", "goc"):
+            contact[key] = None if contact.get(key) is None else contact[key] * fz
+    tilt = c.get("tilt")
+    if tilt:
+        tilt["gx"], tilt["gy"] = tilt.get("gx", 0.0) * fz / fx, tilt.get("gy", 0.0) * fz / fx
+        tilt["xref"], tilt["yref"] = tilt.get("xref", 0.0) * fx, tilt.get("yref", 0.0) * fx
+    c["fwl_below"] = c.get("fwl_below", 0.0) * fz
+
+
+def _scale_facies(cfg, fx, fz):
+    for zone in cfg.get("zones", []):
+        for key in ("major", "minor", "major2", "minor2"):
+            if key in zone:
+                zone[key] *= fx
+        for key in ("vert", "vert2"):
+            if key in zone:
+                zone[key] *= fz
+    for obj in cfg.get("objects", []):
+        for key in ("length", "width", "amplitude", "wavelength"):
+            if key in obj:
+                obj[key] *= fx
+        obj["thickness"] *= fz
+        obj["centerline"] = [[x * fx, y * fx] for x, y in obj.get("centerline", [])]
+
+
 def convert_project(p, new_xy: str, new_z: str):
     """Re-express every stored length in ``new_xy`` / ``new_z`` (in place). Returns a short log."""
     crs = p.crs
@@ -285,23 +312,37 @@ def convert_project(p, new_xy: str, new_z: str):
     vc = getattr(p, "volumetrics", None)
     if vc:                                            # contact depths and the saturation-height entry height are depths / heights
         c = vc["contacts"]
-        for k in ("owc", "goc"):
-            c[k] = None if c.get(k) is None else c[k] * fz
-        for b in c.get("blocks", {}).values():
-            for k in ("owc", "goc"):
-                b[k] = None if b.get(k) is None else b[k] * fz
-        for rv in (c.get("regions") or {}).get("values", {}).values():
-            for k in ("owc", "goc"):
-                rv[k] = None if rv.get(k) is None else rv[k] * fz
-        t = c.get("tilt")
-        if t:
-            t["gx"], t["gy"] = t.get("gx", 0.0) * fz / fx, t.get("gy", 0.0) * fz / fx
-            t["xref"], t["yref"] = t.get("xref", 0.0) * fx, t.get("yref", 0.0) * fx
-        c["fwl_below"] = c.get("fwl_below", 0.0) * fz
+        _scale_contacts(c, fx, fz)
         if vc.get("unc", {}).get("struct"):
             vc["unc"]["struct"][0] *= fz
         vc["sw"]["entry"] = vc["sw"]["entry"] * fz
         vc["unc"]["owc"] = [a * fz for a in vc["unc"]["owc"]]
+    for model in p.property_models.values():
+        if model.get("method") == "satheight":
+            for row in model.get("rows", []):
+                row["entry"] = float(row["entry"]) * fz
+                if "gas_entry" in row:
+                    row["gas_entry"] *= fz
+    if p.facies:
+        _scale_facies(p.facies, fx, fz)
+    for job in p.property_jobs:
+        cfg = job["config"]
+        kind = job["type"]
+        if kind == "facies":
+            _scale_facies(cfg, fx, fz)
+        elif kind == "stochastic":
+            for prop in cfg["props"].values():
+                for row in prop["rows"] + prop.get("facies_rows", []):
+                    row["major"] *= fx
+                    row["minor"] *= fx
+                    row["vert"] *= fz
+        elif kind == "saturation":
+            if cfg["method"] == "satheight":
+                for row in cfg["rows"]:
+                    row["entry"] *= fz
+                    if "gas_entry" in row:
+                        row["gas_entry"] *= fz
+            _scale_contacts(cfg["contacts"]["contacts"], fx, fz)
     dg = p.digitized
     for c in dg.get("contours", []):
         c["z"] = c["z"] * fz

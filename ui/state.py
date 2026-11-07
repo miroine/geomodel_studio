@@ -18,6 +18,8 @@ def proj() -> Project:
         st.session_state["proj"] = Project()
         st.session_state["rev"] = 0
     p = st.session_state["proj"]
+    if not hasattr(p, "display_settings"):
+        p.display_settings = {}
     un.set_active(p.crs)
     return p
 
@@ -138,9 +140,49 @@ def grid_view_layers(grid, prefix: str) -> np.ndarray:
     return visible
 
 
+def cell_property_values(p, selection):
+    g = p.grid
+    if g is None:
+        raise ValueError("Build the grid before inspecting cells.")
+    cell = selection["cell_id"]
+    if not isinstance(cell, int) or isinstance(cell, bool) or not 0 <= cell < g.ncells:
+        raise ValueError("Selected cell is not in the current grid.")
+    index = np.unravel_index(cell, g.actnum.shape)
+    if not g.actnum[index]:
+        raise ValueError("Selected cell is inactive.")
+    rows = []
+    for name, prop in p.properties.items():
+        status = "Stale / different grid" if prop.stale or prop.values.shape != g.actnum.shape else "Current"
+        value = float(prop.values[index]) if status == "Current" else None
+        if value is not None and not np.isfinite(value):
+            value, status = None, "Undefined"
+        code = str(int(value)) if prop.kind == "discrete" and value is not None else ""
+        rows.append(dict(Property=name, Value=value, Unit=prop.unit, Label=prop.legend.get(code, ""), Status=status))
+    return rows
+
+
+def grid_view_inspector(selection, p=None, prefix="cell"):
+    """Show the validated grid pick returned by viewer3d; indices are globally 1-based."""
+    if not selection:
+        st.caption("Click a visible grid cell to inspect its global I / J / K and property value.")
+        return
+    value = selection["value"]
+    text = "undefined" if value is None else f"{value:.8g}"
+    st.caption(f"Selected cell: I={selection['i']} · J={selection['j']} · K={selection['k']} (1-based) · "
+               f"{selection['property']} = {text} {selection.get('unit', '')}")
+    if p is not None and p.properties:
+        rows = cell_property_values(p, selection)
+        names = [r["Property"] for r in rows]
+        chosen = st.multiselect("Other properties at selected cell", names, default=names,
+                                key=k(prefix + "_inspect", names))
+        st.dataframe(pd.DataFrame([r for r in rows if r["Property"] in chosen],
+                                  columns=["Property", "Value", "Unit", "Label", "Status"]), hide_index=True)
+        st.caption("Raw values at the same global cell, including undefined/stale status; colour clipping and log scales are not applied.")
+
+
 def build_scene(p: Project, surfaces=None, faults=True, polygons=True, wells=True, tops=True, grid=None, prop="Zone",
                 i0=0, j0=0, clip_to_boundary=False, well_scale=1.0, hidden=(), surface_opacity=1.0, max_nodes=140_000,
-                horizons=None, props=None, layer_mask=None):
+                horizons=None, props=None, layer_mask=None, grid_opacity=1.0):
     """Assemble the WebGL scene for the 3D window and the inline previews.
 
     ``surfaces``: library surfaces; ``horizons``: names of structural-model horizons (faulted / calibrated result)."""
@@ -168,13 +210,16 @@ def build_scene(p: Project, surfaces=None, faults=True, polygons=True, wells=Tru
         if mask is not None and not s.geom.same_lattice(lat):
             s = s.resample_to(lat)
         sc.surface(s, visible=(n not in hidden), mask=mask if s.geom.same_lattice(lat) else None, opacity=surface_opacity,
-                   max_nodes=max_nodes, vrange=vr)
+                   max_nodes=max_nodes, vrange=vr, display=p.display_settings.get("surfaces", {}).get(n))
         shown.append(n)
     for h, z in hz:
-        sc.surface(Surface(h, lat, z), group="Structural model", mask=mask, opacity=surface_opacity, max_nodes=max_nodes, vrange=vr)
+        sc.surface(Surface(h, lat, z), group="Structural model", mask=mask, opacity=surface_opacity, max_nodes=max_nodes, vrange=vr,
+                   fault_cuts=p.structure.faults, fault_reference=p.structure.base[h],
+                   display=p.display_settings.get("surfaces", {}).get(h))
     zlo, zhi = vr if vr else (1000.0, 3000.0)
     if grid is not None:
-        sc.grid(grid, prop, i0, j0, props=props if props is not None else p.properties, layer_mask=layer_mask)
+        sc.grid(grid, prop, i0, j0, props=props if props is not None else p.properties, layer_mask=layer_mask,
+                opacity=grid_opacity, display=p.display_settings.get("properties"))
         zlo = min(zlo, float(grid.zc.min()))
         zhi = max(zhi, float(grid.zc.max()))
     ref = p.surfaces[shown[0]] if shown else (Surface(hz[0][0], lat, hz[0][1]) if hz else None)
@@ -200,7 +245,8 @@ def _context(sc, p, zlo, zhi, ref, faults, polygons, wells, tops, well_scale=1.0
         sc.tops_points(p.tops)
 
 
-def scene_from_arrays(p: Project, items, faults=None, polygons=False, wells=True, tops=True, clip=True, depth_color=None, well_scale=1.0):
+def scene_from_arrays(p: Project, items, faults=None, polygons=False, wells=True, tops=True, clip=True, depth_color=None, well_scale=1.0,
+                      fault_cuts=(), fault_references=None):
     """Scene from ``[(name, Z on the model lattice)]`` (structural-model horizons, faulted previews ...)."""
     from ui.scene import Scene
     from ui.theme import PALETTE
@@ -212,13 +258,15 @@ def scene_from_arrays(p: Project, items, faults=None, polygons=False, wells=True
     if bp is not None:
         X, Y = lat.coords()
         mask = pg.inside(X, Y, bp.pts)
-    single = (len(items) == 1) if depth_color is None else depth_color
+    single = True if depth_color is None else depth_color
     zs = []
     for i, (n, Z) in enumerate(items):
         Z = np.asarray(Z, float)
         if np.isfinite(Z).any():
             zs += [float(np.nanmin(Z)), float(np.nanmax(Z))]
-        sc.surface(Surface(n, lat, Z), color=PALETTE[i % len(PALETTE)], color_by_depth=single, mask=mask)
+        sc.surface(Surface(n, lat, Z), color=PALETTE[i % len(PALETTE)], color_by_depth=single, mask=mask,
+                   fault_cuts=fault_cuts, fault_reference=(fault_references or {}).get(n),
+                   display=p.display_settings.get("surfaces", {}).get(n))
     zlo, zhi = (min(zs), max(zs)) if zs else (1000.0, 3000.0)
     _context(sc, p, zlo, zhi, Surface(items[0][0], lat, np.asarray(items[0][1], float)) if items else None, faults, polygons, wells, tops, well_scale)
     return sc

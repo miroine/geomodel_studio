@@ -1,4 +1,4 @@
-"""McKinsey-style visual identity: deep navy, electric blue, serif action titles, restrained cards."""
+"""Shared visual theme and lightweight layout helpers for GeoModel Studio."""
 from __future__ import annotations
 
 import streamlit as st
@@ -16,46 +16,75 @@ ZONE_COLORS = ["#CFE3F7", "#9CC5EE", "#5E9BE0", "#2251FF", "#1D4FB0", "#0B2A6B",
 
 CSS = f"""
 <style>
-html, body, [class*="css"] {{ font-family: Arial, Helvetica, sans-serif; color: {INK}; }}
-h1, h2, h3, .action-title {{ font-family: Georgia, 'Times New Roman', serif !important; color: {NAVY}; letter-spacing: .1px; }}
-.block-container {{ padding-top: 1.1rem; padding-bottom: 3rem; max-width: 1500px; }}
-section[data-testid="stSidebar"] {{ background: {NAVY}; }}
-section[data-testid="stSidebar"] * {{ color: #E8EEF5 !important; }}
-section[data-testid="stSidebar"] .stRadio label {{ padding: 5px 8px; border-radius: 2px; }}
-section[data-testid="stSidebar"] .stRadio label:hover {{ background: #0B3350; }}
-section[data-testid="stSidebar"] div.stButton > button {{ width: 100%; justify-content: flex-start; text-align: left; background: transparent; border: 0; border-left: 3px solid transparent; border-radius: 0; padding: 2px 8px; font-size: 12.5px; color: #E8EEF5; }}
-section[data-testid="stSidebar"] div.stButton > button:hover {{ background: #0B3350; }}
-section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {{ background: #0B3350; border-left: 3px solid {BLUE}; font-weight: 700; }}
-section[data-testid="stSidebar"] [data-testid="stExpander"] {{ border: 0; background: transparent; }}
-section[data-testid="stSidebar"] [data-testid="stExpander"] summary {{ padding: 3px 4px; font-size: 12.5px; }}
-.tree-grp {{ font-size: 10.5px; letter-spacing: .9px; text-transform: uppercase; color: #7FD1F5; margin: 8px 0 2px; border-bottom: 1px solid #20405a; padding-bottom: 2px; }}
-section[data-testid="stSidebar"] hr {{ border-color: #20405a; }}
-.brand {{ font-family: Georgia, serif; font-size: 1.35rem; color: #fff !important; margin: .2rem 0 0 0; }}
-.brand small {{ display:block; font: 11px Arial; letter-spacing: 1.6px; text-transform: uppercase; color: {CYAN} !important; margin-top: 2px; }}
-.banner {{ background: {NAVY}; color: #fff; padding: 14px 22px; border-left: 6px solid {BLUE}; margin-bottom: 14px; }}
-.banner .kicker {{ font-size: 11px; letter-spacing: 1.6px; text-transform: uppercase; color: {CYAN}; }}
-.banner .action-title {{ color: #fff !important; font-size: 1.55rem; margin: 2px 0 0 0; line-height: 1.25; }}
-.kpis {{ display: flex; gap: 10px; flex-wrap: wrap; margin: 4px 0 14px 0; }}
-.kpi {{ flex: 1; min-width: 130px; background: {BG}; border: 1px solid {LINE}; border-top: 3px solid {BLUE}; padding: 8px 12px; }}
-.kpi .v {{ font: 1.55rem Georgia, serif; color: {NAVY}; }}
-.kpi .l {{ font-size: 11px; letter-spacing: .8px; text-transform: uppercase; color: {MUTE}; }}
-.stepper {{ display: flex; gap: 0; margin: 6px 0 16px 0; flex-wrap: wrap; }}
-.step {{ flex: 1; min-width: 120px; padding: 8px 10px; background: {BG}; border: 1px solid {LINE}; border-right: none; font-size: 12px; }}
-.step:last-child {{ border-right: 1px solid {LINE}; }}
-.step b {{ display: block; color: {NAVY}; font-size: 12.5px; }}
-.step.done {{ background: #E3EBFF; border-bottom: 3px solid {BLUE}; }}
-.step.todo {{ color: {MUTE}; }}
-.note {{ border-left: 3px solid {CYAN}; background: {BG}; padding: 8px 12px; margin: 8px 0; font-size: 13px; }}
+html, body, [class*="css"] {{ font-family: Inter, "Segoe UI", Arial, sans-serif; color: {INK}; }}
+h1, h2, h3, .action-title {{ font-family: Inter, "Segoe UI", Arial, sans-serif !important; color: {NAVY}; letter-spacing: -.025em; }}
+.block-container {{ padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1540px; }}
+section[data-testid="stSidebar"] {{ background: #F7F9FC; border-right: 1px solid {LINE}; }}
+section[data-testid="stSidebar"] * {{ color: {INK}; }}
+section[data-testid="stSidebar"] div.stButton > button {{ width: 100%; justify-content: flex-start; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 6px 10px; font-size: 13px; color: {INK}; }}
+section[data-testid="stSidebar"] div.stButton > button:hover {{ background: #EAF0F8; border-color: #E0E7F0; }}
+section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {{ background: #E7EEFF; border-color: #D4E0FF; color: {BLUE}; font-weight: 700; }}
+section[data-testid="stSidebar"] [data-testid="stExpander"] {{ border: 1px solid {LINE}; border-radius: 10px; background: #FFFFFF; margin-bottom: 8px; }}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary {{ padding: 8px 10px; font-size: 13px; font-weight: 650; }}
+section[data-testid="stSidebar"] hr {{ border-color: {LINE}; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_ok_"] button p {{ color: #167541 !important; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_stale_"] button p {{ color: #B45B15 !important; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_missing_"] button p {{ color: {MUTE} !important; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_"] {{ border-left: 3px solid {LINE}; padding-left: 6px; margin-bottom: 5px; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_surface"] {{ border-left-color: #2251FF; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_fault"] {{ border-left-color: #D7263D; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_polygon"] {{ border-left-color: #6A4C93; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_well"] {{ border-left-color: #B45B15; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_structure"] {{ border-left-color: #2251FF; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_zone"] {{ border-left-color: #1B998B; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_grid"] {{ border-left-color: #00A9F4; }}
+section[data-testid="stSidebar"] [class*="st-key-tree_kind_prop"] {{ border-left-color: #6A4C93; }}
+.brand {{ font-size: 1.22rem; font-weight: 750; letter-spacing: -.035em; color: {NAVY} !important; margin: .2rem 0 .95rem 0; }}
+.brand small {{ display:block; font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: {MUTE} !important; margin-top: 4px; }}
+.nav-label {{ color: {MUTE}; font-size: 10px; font-weight: 750; letter-spacing: .12em; margin: 0 0 6px 2px; }}
+.project-chip {{ padding: 10px 12px; border: 1px solid {LINE}; border-radius: 9px; background: #FFFFFF; color: {NAVY}; overflow-wrap: anywhere; }}
+.banner {{ background: linear-gradient(110deg, #F1F5FF, #FFFFFF 68%); color: {INK}; padding: 18px 22px; border: 1px solid #DDE6F4; border-left: 4px solid {BLUE}; border-radius: 12px; margin-bottom: 18px; }}
+.banner .kicker {{ font-size: 10px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; color: {BLUE}; }}
+.banner .action-title {{ color: {NAVY} !important; font-size: clamp(1.25rem, 2vw, 1.65rem); font-weight: 700; margin: 4px 0 0; line-height: 1.3; }}
+.kpis {{ display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 18px; }}
+.kpi {{ flex: 1; min-width: 130px; background: #FFFFFF; border: 1px solid {LINE}; border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 2px #12243A08; }}
+.kpi .v {{ font-size: 1.45rem; line-height: 1.2; font-weight: 700; color: {NAVY}; }}
+.kpi .l {{ font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: {MUTE}; margin-top: 4px; }}
+.stepper {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0 18px; }}
+.step {{ min-width: 0; padding: 11px 12px; background: #FFFFFF; border: 1px solid {LINE}; border-radius: 9px; font-size: 12px; color: {MUTE}; }}
+.step b {{ display: block; color: {NAVY}; font-size: 13px; margin-bottom: 3px; }}
+.step.done {{ background: #F0F5FF; border-color: #D5E2FF; box-shadow: inset 0 2px 0 {BLUE}; }}
+.step.todo {{ border-style: dashed; }}
+.workflow-construction {{ --task-color: #2251FF; }}
+.workflow-layering {{ --task-color: #1B998B; }}
+.workflow-conditioning {{ --task-color: #6A4C93; }}
+.workflow-refinement {{ --task-color: #B45B15; }}
+.workflow-faults {{ --task-color: #D7263D; }}
+.workflow-node {{ display: flex; align-items: flex-start; gap: 14px; border-left: 4px solid var(--task-color); padding: 10px 12px; background: {BG}; border-radius: 8px; margin-bottom: 10px; }}
+.workflow-number {{ flex: 0 0 34px; background: var(--task-color); color: #FFFFFF; text-align: center; padding: 7px 0; border-radius: 8px; font-weight: 750; }}
+.workflow-content {{ min-width: 0; overflow-wrap: anywhere; }}
+.workflow-category {{ color: var(--task-color); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }}
+.workflow-title {{ font-size: 16px; color: {NAVY}; font-weight: 700; margin: 3px 0 9px; }}
+.workflow-io {{ font-size: 12px; color: {INK}; margin-top: 4px; }}
+.workflow-io b {{ display: inline-block; min-width: 32px; color: {MUTE}; font-size: 10px; }}
+.workflow-connector {{ text-align: center; color: {MUTE}; font-size: 26px; line-height: 1.2; margin: 3px 0 8px; }}
+.workflow-output {{ border: 1px dashed {BLUE}; border-radius: 10px; background: #F1F5FF; padding: 14px; text-align: center; font-size: 13px; color: {INK}; }}
+.workflow-legend {{ display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 6px 0 18px; }}
+.workflow-legend span {{ border-left: 4px solid var(--task-color); padding-left: 7px; color: {INK}; font-size: 12px; }}
+.sidebar-flow-title {{ display: flex; align-items: center; gap: 8px; color: {NAVY}; font-size: 13px; font-weight: 700; }}
+.sidebar-flow-title span {{ background: {BLUE}; color: #FFFFFF !important; padding: 4px 6px; border-radius: 6px; font-size: 11px; }}
+.sidebar-flow-arrow {{ text-align: center; color: {BLUE}; font-size: 22px; line-height: 1.1; margin: 4px 0; }}
+.note {{ border-left: 3px solid {CYAN}; background: {BG}; border-radius: 0 8px 8px 0; padding: 10px 13px; margin: 8px 0; font-size: 13px; }}
 .note.warn {{ border-left-color: {RED}; }}
-div.stButton > button {{ border-radius: 2px; border: 1px solid {LINE}; font-weight: 600; }}
-div.stButton > button[kind="primary"] {{ background: {BLUE}; border-color: {BLUE}; color: #fff; }}
+div.stButton > button {{ border-radius: 8px; border: 1px solid {LINE}; font-weight: 650; transition: background .15s ease, border-color .15s ease; }}
+div.stButton > button[kind="primary"] {{ background: {BLUE}; border-color: {BLUE}; color: #FFFFFF; }}
 div.stButton > button[kind="primary"]:hover {{ background: #1A40CC; border-color: #1A40CC; }}
-div.stDownloadButton > button {{ border-radius: 2px; font-weight: 600; border: 1px solid {BLUE}; color: {BLUE}; }}
-.stTabs [data-baseweb="tab-list"] {{ gap: 2px; border-bottom: 2px solid {NAVY}; }}
-.stTabs [data-baseweb="tab"] {{ background: {BG}; border-radius: 2px 2px 0 0; padding: 6px 14px; }}
-.stTabs [aria-selected="true"] {{ background: {NAVY}; color: #fff !important; }}
-.stTabs [aria-selected="true"] p {{ color: #fff !important; }}
-.footer {{ margin-top: 30px; padding-top: 8px; border-top: 1px solid {LINE}; color: {MUTE}; font-size: 11.5px; }}
+div.stDownloadButton > button {{ border-radius: 8px; font-weight: 650; border: 1px solid {BLUE}; color: {BLUE}; }}
+.stTabs [data-baseweb="tab-list"] {{ gap: 5px; border-bottom: 1px solid {LINE}; }}
+.stTabs [data-baseweb="tab"] {{ background: transparent; border-radius: 8px 8px 0 0; padding: 8px 14px; }}
+.stTabs [aria-selected="true"] {{ background: #E7EEFF; color: {BLUE} !important; }}
+.stTabs [aria-selected="true"] p {{ color: {BLUE} !important; }}
+.footer {{ margin-top: 30px; padding-top: 10px; border-top: 1px solid {LINE}; color: {MUTE}; font-size: 11.5px; }}
 </style>
 """
 

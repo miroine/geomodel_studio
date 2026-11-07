@@ -32,17 +32,22 @@ def render():
         grid = None
         layer_mask = None
         prop, i0, j0 = "Zone", 0, 0
+        grid_opacity = 1.0
         if p.grid is not None:
             g = p.grid
             show_grid = st.checkbox(f"3D grid ({g.ni} x {g.nj} x {g.nk})", value=True, key=S.k("v3_g"))
             if show_grid:
                 grid = g
-                props = ["Zone", "Layer (k)", "Fault block", "Depth", "Thickness", "PORO", "PERMX", "NTG"]
+                props = list(dict.fromkeys(["Zone", "Layer (k)", "Fault block", "Depth", "Thickness",
+                                            "PORO", "PERMX", "NTG", *p.properties]))
                 a, b, c = st.columns(3)
                 prop = a.selectbox("Colour grid by", props, key=S.k("v3_prop"))
                 i0 = b.slider("Cut-away: first I", 0, max(g.ni - 1, 1), 0, key=S.k("v3_i0"))
                 j0 = c.slider("Cut-away: first J", 0, max(g.nj - 1, 1), 0, key=S.k("v3_j0"))
                 layer_mask = S.grid_view_layers(g, "v3")
+                grid_opacity = st.slider("Grid opacity", 0.05, 1.0, 1.0, 0.05, key=S.k("v3_opacity"))
+                from ui import display
+                display.colors(p, prop, "v3")
         else:
             st.caption("Build the 3D grid (step 6) to add it to this scene.")
     if not (sel or hsel or grid is not None or p.wells or p.polygons or p.faults):
@@ -50,12 +55,16 @@ def render():
         return
     try:
         sc = S.build_scene(p, surfaces=sel, faults=faults, polygons=polys, wells=wells, tops=tops, grid=grid, prop=prop, i0=i0, j0=j0,
-                           clip_to_boundary=clip, well_scale=wscale, surface_opacity=sop, horizons=hsel, layer_mask=layer_mask)
+                           clip_to_boundary=clip, well_scale=wscale, surface_opacity=sop, horizons=hsel, layer_mask=layer_mask,
+                           grid_opacity=grid_opacity)
     except ValueError as e:                      # exterior-face limit of the grid cut-away
         st.warning(str(e))
         return
     ve = st.slider("Initial vertical exaggeration", 1.0, 20.0, 3.0, 0.5, key=S.k("v3_ve"),
                    help="You can also change it live inside the viewer without a rerun")
-    viewer3d(sc, key=S.k("v3d"), height=720, ve=ve)
+    mesh = st.checkbox("Black mesh edges", value=False, key=S.k("v3_mesh"))
+    selection = viewer3d(sc, key=S.k("v3d"), height=720, ve=ve, mesh=mesh)
+    S.grid_view_inspector(selection, p, "v3")
     st.caption("Mouse: **left-drag** orbit · **right-drag / Shift-drag** pan · **wheel** zoom · **double-click** fit. "
-               "The object tree on the left toggles visibility and opacity; *Mesh* shows the cell / triangle edges.")
+               "The object tree toggles visibility and opacity; *Black mesh* shows cell / triangle edges. "
+               "Click a grid face to inspect its cell. Property ramps use public Webviz colour tables.")

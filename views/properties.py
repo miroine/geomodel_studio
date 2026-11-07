@@ -9,11 +9,16 @@ from core import geostat as gs
 from core import regions as rg
 from core import logs as lg
 from core import facies as fa
+from core import petrophysics as petro
 from core import volumetrics as vol
 from ui import state as S
 from ui import specs
 from ui.components import plotly_view, viewer3d
 from ui.theme import banner, kpis, note
+from views import petrophysics as petro_view
+from views import property_workflow as job_view
+from views import facies_objects
+from views import property_results
 
 EXAMPLES = {
     "Porosity-depth trend": "PORO = clip(0.34 * exp(-DEPTH / 7000), 0.02, 0.35)",
@@ -47,7 +52,20 @@ def render():
     stale = [n for n, v in p.properties.items() if v.stale]
     kpis([("Grid", f"{g.ni} x {g.nj} x {g.nk}"), ("Active cells", f"{int(g.actnum.sum()):,}"), ("Properties", len(p.properties)),
           ("Stale", len(stale))])
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(["Properties", "Calculator", "View", "Statistics by zone", "Stochastic modelling", "Planes & regions", "Well logs & kriging", "Facies modelling"])
+    st.caption("Workflow: facies -> petrophysical properties -> water saturation -> 3D QC -> volumetrics / export.")
+    workflow_tab, t1, t8, petro_tab, saturation_tab, tools_tab = st.tabs(
+        ["Workflow", "Property library", "Facies", "Petrophysics", "Water saturation", "QC & tools"])
+    with workflow_tab:
+        job_view.render(p)
+    with petro_tab:
+        parameter_tab, t5 = st.tabs(["Zone / facies parameters", "Stochastic by zone / facies"])
+        with parameter_tab:
+            petro_view.render_petrophysics(p, g)
+    with saturation_tab:
+        petro_view.render_saturation(p, g)
+    with tools_tab:
+        t3, t4, t7, t6, t2 = st.tabs(
+            ["3D & maps", "Statistics by zone", "Well logs & kriging", "Planes & regions", "Calculator"])
     with t6:
         _planes_regions(p, g)
     with t7:
@@ -102,15 +120,33 @@ def render():
                 if c.button("Rename", key=S.k("pr_rn")) and new != sel and new.isidentifier() and new not in p.properties:
                     p.properties = {(new if k == sel else k): v for k, v in p.properties.items()}
                     p.properties[new].name = new
+                    colors = p.display_settings.get("properties", {})
+                    if sel in colors:
+                        colors[new] = colors.pop(sel)
                     st.rerun()
                 if c.button("Delete", key=S.k("pr_del")):
                     p.properties.pop(sel, None)
+                    p.display_settings.get("properties", {}).pop(sel, None)
                     st.rerun()
         long_ = [n for n in p.properties if len(n) > 8]
         if long_:
             st.caption("Names longer than 8 characters (" + ", ".join(long_) + ") cannot be written as Eclipse keywords.")
 
     with t2:
+        _calculator(p, g)
+
+    with t3:
+        _property_qc(p, g)
+
+    with t4:
+        _property_statistics(p, g)
+
+    with t5:
+        _stochastic(p, g)
+
+
+def _calculator(p, g):
+    if not job_view.named_job(p, "calculator"):
         st.caption("A restricted Python calculator working on whole grid arrays. Existing properties and the geometry variables are available "
                    "by name; assignments create or overwrite properties.")
         a, b = st.columns([3, 2])
@@ -143,57 +179,77 @@ def render():
             st.markdown("Operators: `+ - * / // % **`, comparisons, `&` `|` `~` for masks, `a if c else b`. "
                         "Mask assignment: `PORO[ZONE == 3] = 0.1`. No imports, attributes, loops or text.")
 
-    with t3:
-        if not p.properties:
-            note("Create a property first.")
-        else:
-            a, b, c, d = st.columns(4)
-            names = list(p.properties)
-            prop = a.selectbox("Property", names, key=S.k("pv_prop", names))
-            i0 = b.slider("Cut: start column i", 0, g.ni - 1, 0, key=S.k("pv_i"))
-            j0 = c.slider("Cut: start row j", 0, g.nj - 1, 0, key=S.k("pv_j"))
-            ve = d.slider("V.E.", 1.0, 20.0, 4.0, 0.5, key=S.k("pv_ve"))
-            try:
-                sc = S.build_scene(p, surfaces=[], faults=False, polygons=False, wells=False, tops=False, grid=g, prop=prop, i0=i0, j0=j0)
-                viewer3d(sc, key=S.k("prop3d"), height=600, ve=ve)
-            except ValueError as e:
-                st.warning(str(e))
-            pr = p.properties[prop]
-            k = st.slider("Layer k (map)", 1, g.nk, max(g.nk // 2, 1), key=S.k("pv_k"))
-            m1, m2 = st.columns(2)
-            v2 = np.where(g.actnum[k - 1] > 0, pr.values[k - 1], np.nan)
-            with m1:
-                plotly_view(specs.layer_map(v2, f"{prop}, layer {k}", prop), key=S.k("pv_map") + f"{prop}{k}{id(pr)}", height=380)
-            with m2:
-                act = g.actnum > 0
-                groups = {z.name: pr.values[np.broadcast_to((g.layer_zone == zi)[:, None, None], act.shape) & act] for zi, z in enumerate(g.zones)}
-                plotly_view(specs.value_histogram(groups, f"{prop} by zone", prop), key=S.k("pv_hist") + f"{prop}{id(pr)}", height=380)
 
-    with t4:
-        if not p.properties:
-            note("Create a property first.")
-        else:
+def _property_qc(p, g):
+    plot_tab, fence_tab, maps_tab = st.tabs(["3D & layer maps", "Fence intersections", "Average maps"])
+    with plot_tab:
+        _property_3d(p, g)
+    with fence_tab:
+        property_results.intersections(p)
+    with maps_tab:
+        property_results.average_maps(p)
+
+
+def _property_3d(p, g):
+    if not p.properties:
+        note("Create a property first.")
+    else:
+        a, b, c, d = st.columns(4)
+        names = list(p.properties)
+        with a:
+            prop = S.pick("Property", names, "pv_prop", "prop")
+        i0 = b.slider("Cut: start column i", 0, g.ni - 1, 0, key=S.k("pv_i"))
+        j0 = c.slider("Cut: start row j", 0, g.nj - 1, 0, key=S.k("pv_j"))
+        ve = d.slider("V.E.", 1.0, 20.0, 4.0, 0.5, key=S.k("pv_ve"))
+        with st.expander("3D display filters and well context"):
+            layer_mask = S.grid_view_layers(g, "pv")
+            show_wells = st.checkbox("Show wells and tops", value=True, key=S.k("pv_wells"))
+            mesh = st.checkbox("Black mesh edges", value=False, key=S.k("pv_mesh"))
+            opacity = st.slider("Grid opacity", 0.05, 1.0, 1.0, 0.05, key=S.k("pv_opacity"))
+        from ui import display
+        with st.expander("Edit property colours"):
+            display.colors(p, prop, "pv")
+        try:
+            sc = S.build_scene(p, surfaces=[], faults=False, polygons=False, wells=show_wells, tops=show_wells,
+                               grid=g, prop=prop, i0=i0, j0=j0, layer_mask=layer_mask, grid_opacity=opacity)
+            selection = viewer3d(sc, key=S.k("prop3d"), height=600, ve=ve, mesh=mesh)
+            S.grid_view_inspector(selection, p, "pv")
+        except ValueError as e:
+            st.warning(str(e))
+        pr = p.properties[prop]
+        k = st.slider("Layer k (map)", 1, g.nk, max(g.nk // 2, 1), key=S.k("pv_k"))
+        m1, m2 = st.columns(2)
+        v2 = np.where(g.actnum[k - 1] > 0, pr.values[k - 1], np.nan)
+        with m1:
+            plotly_view(display.property_map(p, g, prop, v2, f"{prop}, layer {k}", pr.unit),
+                        key=S.k("pv_map") + f"{prop}{k}{id(pr)}", height=380)
+        with m2:
             act = g.actnum > 0
-            rows = []
-            for n, pr in p.properties.items():
-                if pr.values.shape != act.shape:
-                    continue
-                for zi, z in enumerate(g.zones):
-                    m = np.broadcast_to((g.layer_zone == zi)[:, None, None], act.shape) & act
-                    v = pr.values[m]
-                    v = v[np.isfinite(v)]
-                    rows.append({"Property": n, "Zone": z.name, "Cells": int(m.sum()),
-                                 "Min": float(v.min()) if v.size else None, "Mean": float(v.mean()) if v.size else None,
-                                 "Max": float(v.max()) if v.size else None})
-            st.dataframe(pd.DataFrame(rows).round(4), hide_index=True)
-            if "PORO" in p.properties:
-                ntg = p.properties["NTG"].values if "NTG" in p.properties else 1.0
-                pv = float((g.bulk_volume() * np.nan_to_num(p.properties["PORO"].values) * np.nan_to_num(ntg) * act).sum())
-                st.caption(f"Pore volume (bulk x NTG x PORO, active cells): {pv / 1e6:.2f} M{un.xy()}2{un.z()}  (units follow the project).")
+            groups = {z.name: pr.values[np.broadcast_to((g.layer_zone == zi)[:, None, None], act.shape) & act] for zi, z in enumerate(g.zones)}
+            plotly_view(specs.value_histogram(groups, f"{prop} by zone", prop), key=S.k("pv_hist") + f"{prop}{id(pr)}", height=380)
 
-    with t5:
-        _stochastic(p, g)
 
+def _property_statistics(p, g):
+    if not p.properties:
+        note("Create a property first.")
+    else:
+        act = g.actnum > 0
+        rows = []
+        for n, pr in p.properties.items():
+            if pr.values.shape != act.shape:
+                continue
+            for zi, z in enumerate(g.zones):
+                m = np.broadcast_to((g.layer_zone == zi)[:, None, None], act.shape) & act
+                v = pr.values[m]
+                v = v[np.isfinite(v)]
+                rows.append({"Property": n, "Zone": z.name, "Cells": int(m.sum()),
+                             "Min": float(v.min()) if v.size else None, "Mean": float(v.mean()) if v.size else None,
+                             "Max": float(v.max()) if v.size else None})
+        st.dataframe(pd.DataFrame(rows).round(4), hide_index=True)
+        if "PORO" in p.properties:
+            ntg = p.properties["NTG"].values if "NTG" in p.properties else 1.0
+            pv = float((g.bulk_volume() * np.nan_to_num(p.properties["PORO"].values) * np.nan_to_num(ntg) * act).sum())
+            st.caption(f"Pore volume (bulk x NTG x PORO, active cells): {pv / 1e6:.2f} M{un.xy()}2{un.z()}  (units follow the project).")
 
 # ---------------------------------------------------------------------------------------------
 ROW_COLS = ["zone", "simulate", "p1", "p2", "p3", "vmin", "vmax", "vtype", "major", "minor", "vert", "azimuth", "nugget"]
@@ -217,9 +273,31 @@ def _plain_row(r):
 
 
 def _stochastic(p, g):
+    if job_view.named_job(p, "stochastic"):
+        return
     cfg = _cfg(p, g)
-    st.caption("Generate porosity, permeability and net-to-gross as Gaussian random fields with a variogram per zone, forced onto a target histogram, "
-               "with cross-correlation and net/gross cut-offs. Zones are simulated independently; no well conditioning.")
+    cfg["domain"] = st.radio("Stochastic parameter domains", ["zone", "zone_facies"],
+                            index=0 if cfg.get("domain", "zone") == "zone" else 1, horizontal=True,
+                            format_func=lambda mode: {"zone": "By zone", "zone_facies": "By zone and facies"}[mode],
+                            key=S.k("sx_domain"))
+    row_key = "rows"
+    if cfg["domain"] == "zone_facies":
+        names = [n for n, prop in p.properties.items() if prop.kind == "discrete" and prop.values.shape == g.actnum.shape]
+        if not names:
+            st.warning("Create or import a discrete FACIES property before modelling by zone and facies.")
+            return
+        current = cfg.get("facies", "FACIES")
+        cfg["facies"] = st.selectbox("Stochastic facies property", names, index=names.index(current) if current in names else 0,
+                                    key=S.k("sx_facies", names))
+        try:
+            gs.facies_rows(g, cfg, p.properties, cfg["facies"], p.facies.get("petro", []))
+        except gs.GeostatError as exc:
+            st.error(str(exc))
+            return
+        row_key = "facies_rows"
+    st.caption("Generate porosity, permeability and net-to-gross with separate target histograms and variograms per domain. "
+               "In zone/facies mode, values are assigned only to cells of that facies and histogram ranks use those cells only. "
+               "Domains are simulated independently; optional blocked-well conditioning stays within each domain.")
     with st.expander("1  Setup", expanded=True):
         a, b, c, d = st.columns(4)
         cfg["seed"] = int(a.number_input("Random seed", 0, 10_000_000, int(cfg["seed"]), key=S.k("sx_seed")))
@@ -238,6 +316,7 @@ def _stochastic(p, g):
 
     for pr in gs.PROPS:
         pc = cfg["props"][pr]
+        rows = pc[row_key]
         with st.expander(f"2  {PROP_LABEL[pr]}: histogram and variogram", expanded=(pr == "PORO")):
             a, b = st.columns([1, 2])
             pc["enabled"] = a.checkbox("Simulate", bool(pc["enabled"]), key=S.k("sx_en_" + pr))
@@ -248,7 +327,7 @@ def _stochastic(p, g):
                        f"ranges in {un.xy()} (major, minor) and {un.z()} (vert); azimuth deg from north; nugget 0-1")
             if pc["dist"] == "histogram":
                 if "bins0_" + pr not in st.session_state:
-                    lo, hi = pc["rows"][0]["vmin"], min(pc["rows"][0]["vmax"], pc["rows"][0]["p1"] * 2 + 1e-9)
+                    lo, hi = rows[0]["vmin"], min(rows[0]["vmax"], rows[0]["p1"] * 2 + 1e-9)
                     edges = np.linspace(lo, hi, 7)
                     st.session_state["bins0_" + pr] = pd.DataFrame([[edges[i], edges[i + 1], w] for i, w in enumerate([1, 3, 5, 5, 3, 1])],
                                                                     columns=["lower", "upper", "weight"])
@@ -262,18 +341,26 @@ def _stochastic(p, g):
                     pc["values"] = gs.parse_values(txt)
                 except gs.GeostatError as e:
                     st.error(str(e))
-            sig = "|".join(r["zone"] for r in pc["rows"]) + pc["dist"]
+            sig = "|".join(r["zone"] for r in rows) + pc["dist"]
+            if row_key == "facies_rows":
+                sig += "|" + cfg["facies"] + "|" + "|".join(str(r["code"]) for r in rows)
             kdf = f"rows0_{pr}_{sig}"
             if kdf not in st.session_state:
-                st.session_state[kdf] = pd.DataFrame(pc["rows"])[ROW_COLS]
-            ed = st.data_editor(st.session_state[kdf], key=S.k("sx_rows_" + pr + sig))
+                cols = ["zone", "code", "facies"] + ROW_COLS[1:] if row_key == "facies_rows" else ROW_COLS
+                st.session_state[kdf] = pd.DataFrame(rows)[cols]
+            ed = st.data_editor(st.session_state[kdf], key=S.k("sx_rows_" + pr + sig),
+                                disabled=["zone", "code", "facies"] if row_key == "facies_rows" else ["zone"])
             try:
-                pc["rows"] = [_plain_row(r) for r in ed.to_dict("records")]
-            except Exception as e:
+                pc[row_key] = [dict(_plain_row(r), code=int(r["code"]), facies=str(r["facies"]))
+                               if row_key == "facies_rows" else _plain_row(r) for r in ed.to_dict("records")]
+            except (KeyError, TypeError, ValueError) as e:
                 st.error(f"Table error: {e}")
+                return
             try:
-                zi = st.selectbox("Preview zone", [r["zone"] for r in pc["rows"]], key=S.k("sx_pz_" + pr, [r["zone"] for r in pc["rows"]]))
-                row = next(r for r in pc["rows"] if r["zone"] == zi)
+                labels = [f"{r['facies']} (code {r['code']})" if row_key == "facies_rows" else r["zone"] for r in pc[row_key]]
+                zi = st.selectbox("Preview zone / facies" if row_key == "facies_rows" else "Preview zone",
+                                  labels, key=S.k("sx_pz_" + pr, labels))
+                row = pc[row_key][labels.index(zi)]
                 uu = (np.arange(4000) + 0.5) / 4000
                 q = np.clip(gs.quantile(pc["dist"], uu, row, dict(bins=pc["bins"], values=pc["values"])), row["vmin"], row["vmax"])
                 plotly_view(specs.value_histogram({"target": q}, f"Target histogram - {zi}", pr), key=S.k("sx_prev_" + pr) + f"{zi}{pc['dist']}{q.mean():.4g}", height=240)
@@ -326,9 +413,10 @@ def _stochastic(p, g):
         try:
             bar = st.progress(0.0)
             cnd = {k: p.properties[v].values for k, v in cfg.get("cond", {}).items() if v in p.properties and p.properties[v].values.shape == (g.nk, g.nj, g.ni)}
-            res = gs.simulate(g, cfg, progress=lambda f: bar.progress(min(float(f), 1.0)), cond=cnd or None)
+            res = gs.simulate(g, cfg, progress=lambda f: bar.progress(min(float(f), 1.0)), cond=cnd or None, properties=p.properties)
             for n, r in res.items():
-                p.properties[n] = pp.make_property(g, n, r["values"], r["kind"], r["unit"], "stochastic", "stochastic workflow")
+                p.properties[n] = pp.make_property(g, n, r["values"], r["kind"], r["unit"], "stochastic",
+                                                   f"stochastic workflow by {cfg['domain']}" + (f" / {cfg['facies']}" if row_key == "facies_rows" else ""))
             st.session_state["sx_last"] = list(res)
             st.rerun()
         except gs.GeostatError as e:
@@ -337,6 +425,7 @@ def _stochastic(p, g):
     last = [n for n in st.session_state.get("sx_last", []) if n in p.properties]
     if last:
         st.success("Stored: " + ", ".join(last))
+        st.caption("QC shows stored realizations. Rerun after changing domain settings, facies or conditioning inputs.")
         _stoch_qc(p, g, cfg, last)
 
 
@@ -350,6 +439,20 @@ def _stoch_qc(p, g, cfg, last):
     act = g.actnum > 0
     ks = np.where(g.layer_zone == zi)[0]
     m = act[ks]
+    code = None
+    if cfg.get("domain", "zone") == "zone_facies":
+        try:
+            facies = petro.property_values(g, p.properties, cfg.get("facies", ""), discrete=True)
+        except petro.PetroError as exc:
+            st.error(str(exc))
+            return
+        codes = [int(c) for c in np.unique(facies[ks][m])]
+        if not codes:
+            st.info("This zone has no active facies cells.")
+            return
+        code = st.selectbox("QC facies code", codes, key=S.k("sx_qfacies", [zi, cfg["facies"], codes]),
+                            format_func=lambda c: f"{c} - {p.properties[cfg['facies']].legend.get(str(c), c)}")
+        m &= facies[ks] == code
     if not m.any():
         st.info("This zone has no active cells.")
         return
@@ -367,7 +470,8 @@ def _stoch_qc(p, g, cfg, last):
                              layout=specs.base_layout("PORO vs PERMX", xaxis=dict(title="PORO"), yaxis=dict(title="PERMX (mD)", type="log"))),
                         key=S.k("sx_xp") + f"{zi}{sfx}{len(last)}", height=300)
     if "PORO" in vals:
-        row = next(r for r in cfg["props"]["PORO"]["rows"] if r["zone"] == zn[zi])
+        rows = cfg["props"]["PORO"]["facies_rows" if code is not None else "rows"]
+        row = next(r for r in rows if r["zone"] == zn[zi] and (code is None or r["code"] == code))
         dz = float(g.thickness()[ks][m].mean())
         sp = (float(np.diff(g.xs).mean()), float(np.diff(g.ys).mean()), dz)
         traces = []
@@ -381,7 +485,10 @@ def _stoch_qc(p, g, cfg, last):
             plotly_view(dict(data=traces, layout=specs.base_layout("PORO variogram (normalised)", xaxis=dict(title="Lag"), yaxis=dict(title="gamma"))),
                         key=S.k("sx_vg") + f"{zi}{sfx}{len(last)}", height=300)
     with t4:
-        ac = gs.achieved_correlation(g, {k: v for k, v in vals.items() if k in ("PORO", "PERMX", "NTG")}, zi)
+        qc_values = {k: v for k, v in vals.items() if k in ("PORO", "PERMX", "NTG")}
+        if code is not None:
+            qc_values = {k: np.where(facies == code, v, np.nan) for k, v in qc_values.items()}
+        ac = gs.achieved_correlation(g, qc_values, zi)
         if ac:
             st.markdown("**Achieved correlation**")
             st.dataframe(pd.DataFrame([dict(pair=k, pearson=round(v["pearson"], 3), spearman=round(v["spearman"], 3)) for k, v in ac.items()]), hide_index=True)
@@ -572,8 +679,10 @@ def _facies_cfg(p, g, nf):
 
 
 def _facies(p, g):
+    if job_view.named_facies(p):
+        return
     st.caption("Model facies as in Petrel / RMS: truncated Gaussian (ordered facies), plurigaussian (two fields + truncation rule), sequential indicator "
-               "simulation or object modelling (ellipsoidal bodies in a background), then create PORO / PERM / NTG per facies.")
+               "simulation or object modelling (ellipsoids or fluvial channels in a background), then create PORO / PERM / NTG per facies.")
     nf0 = len(p.facies["facies"]) if p.facies else 3
     with st.expander("1  Facies and method", expanded=True):
         a, b, c, d = st.columns(4)
@@ -661,14 +770,9 @@ def _facies(p, g):
         with st.expander("3  Objects", expanded=True):
             cfg["background"] = int(st.selectbox("Background facies (code)", [f["code"] for f in cfg["facies"]],
                                                  index=0, key=S.k("fa_bg", [f["code"] for f in cfg["facies"]])))
-            okey = "fa_obj|" + "|".join(names)
-            if okey not in st.session_state:
-                st.session_state[okey] = pd.DataFrame(cfg["objects"])[["code", "length", "width", "thickness", "azimuth"]]
-            edo = st.data_editor(st.session_state[okey], key=S.k("fa_o" + okey), num_rows="dynamic", hide_index=True)
             try:
-                cfg["objects"] = [dict(code=int(r.code), length=float(r.length), width=float(r.width), thickness=float(r.thickness), azimuth=float(r.azimuth))
-                                  for r in edo.itertuples(index=False) if pd.notna(r.code) and pd.notna(r.length) and pd.notna(r.width) and pd.notna(r.thickness)]
-            except Exception as e:
+                facies_objects.render(cfg, p, lambda field: S.k("fa_obj_" + field))
+            except (KeyError, TypeError, ValueError) as e:
                 st.error(f"Object table: {e}")
             cfg["azimuth_sd"] = float(st.number_input("Azimuth scatter (deg, standard deviation)", 0.0, 90.0, float(cfg["azimuth_sd"]), key=S.k("fa_asd")))
             st.caption("Dimensions vary +/- 20 % per body; bodies overwrite earlier ones; object models are not conditioned to wells.")
@@ -723,7 +827,10 @@ def _facies(p, g):
                                                              yaxis=dict(title="Layer (k)", autorange="reversed", gridcolor=specs.LINE))),
                     key=S.k("fa_vpc") + f"{last}{arr.sum():.6g}", height=330)
         k_ = int(st.slider("Layer", 1, g.nk, min(g.nk, 3), key=S.k("fa_lay", [g.nk]))) - 1
-        plotly_view(specs.layer_map(np.where(g.actnum[k_] > 0, arr[k_], np.nan), f"{last}, layer {k_ + 1}", "Facies code"), key=S.k("fa_map") + f"{last}{k_}{arr.sum():.6g}", height=320)
+        from ui import display
+        plotly_view(display.property_map(p, g, last, np.where(g.actnum[k_] > 0, arr[k_], np.nan),
+                                        f"{last}, layer {k_ + 1}"),
+                    key=S.k("fa_map") + f"{last}{k_}{arr.sum():.6g}", height=320)
     with st.expander("5  Petrophysics per facies", expanded=False):
         for f_, r_ in zip(cfg["facies"], cfg["petro"]):
             r_["code"] = f_["code"]

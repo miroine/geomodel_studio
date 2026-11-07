@@ -518,6 +518,12 @@ window.addEventListener("keydown",e=>{
 });
 window.addEventListener("keyup",e=>{ if(e.code==="Space") S.spaceDown=false; });
 window.addEventListener("resize",()=>{ resize(); draw(); });
+new ResizeObserver(()=>{
+  const r=document.getElementById("wrap").getBoundingClientRect();
+  resize();
+  if(S.fitPending&&r.width>50&&r.height>50){ fitView(); S.fitPending=false; }
+  else draw();
+}).observe(document.getElementById("wrap"));
 
 /* ---------- Streamlit render ---------- */
 function init(args){
@@ -530,7 +536,7 @@ function init(args){
   S.faults=(args.faults||[]).map((f,i)=>Object.assign({color:COLORS[i%COLORS.length],growth:0},f,{trace:f.trace.map(p=>[p[0],p[1]])})); S.sel=S.faults.length?0:-1;
   S.zVal=args.z_default!=null?args.z_default:2000; S.zStep=0; S.msg="";
   buildGrid(args.grid||null);
-  buildBar(); resize(); fitView(); helpText(); buildPanel();
+  buildBar(); resize(); fitView(); S.fitPending=S.W<=50||S.H<=50; helpText(); buildPanel();
 }
 window.addEventListener("message",e=>{
   if(!e.data||e.data.type!=="streamlit:render") return;

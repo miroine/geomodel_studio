@@ -19,6 +19,28 @@ from . import theme
 DEPTH_STOPS = ["#D7191C", "#FDAE61", "#FFFFBF", "#ABD9E9", "#2C7BB6"]       # red = shallow, blue = deep
 THICK_STOPS = ["#F7FBFF", "#9ECAE1", "#4292C6", "#08519C", "#051C2C"]
 SEQ_STOPS = ["#440154", "#3B528B", "#21908C", "#5DC863", "#FDE725"]
+# Webviz well-log viewer's public Physics / Physics reverse and Colors_set_3 tables.
+WEBVIZ_SOURCE = "https://github.com/equinor/webviz-subsurface/blob/master/webviz_subsurface/plugins/_well_log_viewer/utils/default_color_tables.py"
+WEBVIZ_PHYSICS = ["#FF0000", "#B6B600", "#00FF00", "#00B6B6", "#0000FF"]
+WEBVIZ_CATEGORIES = ["#78B5FF", "#FF1D66", "#F7FFAD", "#EF9DFF", "#BAFFEC",
+                     "#2EFF79", "#D4FF90", "#A5FF8F", "#7AFF59", "#FFD4D5"]
+COLOR_PRESETS = {"Webviz Physics": WEBVIZ_PHYSICS, "Webviz Physics reverse": WEBVIZ_PHYSICS[::-1],
+                 "Webviz Colors set 3": WEBVIZ_CATEGORIES, "Depth (shallow red, deep blue)": DEPTH_STOPS,
+                 "Viridis": SEQ_STOPS}
+
+
+def display_stops(settings, default):
+    stops = settings.get("stops") or COLOR_PRESETS.get(settings.get("preset"), default)
+    import re
+    if not isinstance(stops, (list, tuple)) or len(stops) < 2 or not all(
+            isinstance(c, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", c) for c in stops):
+        raise ValueError("A colour ramp needs at least two valid #RRGGBB colours.")
+    return list(stops)
+
+
+def property_stops(prop):
+    """Water saturation increases toward blue; other continuous properties toward red."""
+    return WEBVIZ_PHYSICS if prop.upper() in ("SW", "SWAT", "WATER SATURATION", "DEPTH", "LAYER (K)") else WEBVIZ_PHYSICS[::-1]
 
 
 def b64(a, dtype) -> str:
@@ -33,7 +55,7 @@ def _hex2rgb(h):
 def colorize(vals, vmin, vmax, stops) -> np.ndarray:
     """vals -> uint8 (n, 3) along a multi-stop ramp (NaN -> grey)."""
     vals = np.asarray(vals, float)
-    t = np.clip((vals - vmin) / max(vmax - vmin, 1e-12), 0, 1)
+    t = np.clip((np.where(np.isfinite(vals), vals, vmin) - vmin) / max(vmax - vmin, 1e-12), 0, 1)
     S = np.array([_hex2rgb(s) for s in stops])
     x = t * (len(S) - 1)
     i0 = np.clip(np.floor(x).astype(int), 0, len(S) - 2)
@@ -45,6 +67,19 @@ def colorize(vals, vmin, vmax, stops) -> np.ndarray:
 
 def legend_ramp(title, vmin, vmax, stops, fmt="{:.0f}"):
     return dict(title=title, vmin=fmt.format(vmin), vmax=fmt.format(vmax), colors=list(stops))
+
+
+def _property_colors(values, scale):
+    if scale["kind"] != "discrete":
+        return colorize(values, scale["vmin"], scale["vmax"], scale["stops"])
+    palette = np.array([_hex2rgb(h) for h in scale["colors"]])
+    if "codes" in scale:
+        indices = np.searchsorted(scale["codes"], np.where(np.isfinite(values), values, scale["codes"][0]))
+    else:
+        indices = np.where(np.isfinite(values), values, scale["first"]).astype(int) - scale["first"]
+    rgb = palette[np.clip(indices, 0, len(palette) - 1)].round().astype(np.uint8)
+    rgb[~np.isfinite(values)] = (190, 190, 190)
+    return rgb
 
 
 class Scene:
@@ -84,7 +119,8 @@ class Scene:
 
     # -- builders ---------------------------------------------------------
     def surface(self, s: Surface, group="Surfaces", color=None, color_by_depth=True, vrange=None, max_nodes=140_000,
-                visible=True, opacity=1.0, mask: Optional[np.ndarray] = None):
+                visible=True, opacity=1.0, mask: Optional[np.ndarray] = None, fault_cuts=(), fault_reference=None,
+                display=None):
         z = s.z.copy()
         if mask is not None:
             z[~mask] = np.nan
@@ -109,14 +145,34 @@ class Scene:
             m = (p >= 0) & (q >= 0) & (r >= 0) & ~full
             if m.any():
                 tri = np.concatenate([tri, np.column_stack([p[m], q[m], r[m]]).astype(np.uint32)])
+        if fault_cuts and tri.size:
+            reference = s.z if fault_reference is None else np.asarray(fault_reference, float)
+            if reference.shape != s.z.shape:
+                raise ValueError("Fault reference depths must match the surface geometry.")
+            mean_depth = float(np.nanmean(reference))
+            reference = reference[::step, ::step][valid]
+            if not np.isfinite(reference).all():
+                raise ValueError("Fault reference depths must be finite at displayed surface nodes.")
+            x, y = X[valid], Y[valid]
+            keep = np.ones(len(tri), dtype=bool)
+            for fault in fault_cuts:
+                side = fault.side(x, y, reference)
+                amount = np.abs(fault.throw_at_depth(mean_depth) * fault.throw_fraction(x, y))
+                if fault.ftype in ("strike_slip", "transverse"):
+                    amount = np.maximum(amount, abs(fault.slip) * fault.slip_fraction(x, y))
+                for first, second in ((0, 1), (1, 2), (2, 0)):
+                    a, b = tri[:, first], tri[:, second]
+                    keep &= ~((side[a] != side[b]) & (np.maximum(amount[a], amount[b]) > 0))
+            tri = tri[keep]
         ox, oy = self.off(X[valid], Y[valid])
         pos = np.column_stack([ox, oy, zz[valid]]).astype(np.float32)
         obj = dict(name=s.name, group=group, type="mesh", pos=b64(pos, np.float32), idx=b64(tri, np.uint32),
                    color=color or theme.BLUE, visible=visible, opacity=opacity)
         if color_by_depth:
             lo, hi = vrange or (float(np.nanmin(zz)), float(np.nanmax(zz)))
-            obj["col"] = b64(colorize(zz[valid], lo, hi, DEPTH_STOPS), np.uint8)
-            obj["legend"] = legend_ramp(f"Depth ({un.z()})", lo, hi, DEPTH_STOPS)
+            stops = display_stops(display or {}, DEPTH_STOPS)
+            obj["col"] = b64(colorize(zz[valid], lo, hi, stops), np.uint8)
+            obj["legend"] = legend_ramp(f"Depth ({un.z()})", lo, hi, stops)
             obj["color"] = "#5E9BE0"
         return self.add(obj, pos)
 
@@ -241,69 +297,135 @@ class Scene:
         return self.add(dict(name=name, group=group, type="points", pos=b64(pos, np.float32), color=color, size=6), pos)
 
     def grid(self, grid, prop="Zone", i0=0, j0=0, group="3D grid", name="3D grid", opacity=1.0, max_faces=120_000, props=None,
-             layer_mask=None):
-        sc, legend = grid_property(grid, prop, props)
-        V, T, S = grid.exterior_faces(i0, j0, sc["values"], max_faces=max_faces, layer_mask=layer_mask)
+             layer_mask=None, display=None):
+        sc, legend = grid_property(grid, prop, props, display)
+        V, T, S, ids = grid.exterior_faces(i0, j0, sc["values"], max_faces=max_faces,
+                                          layer_mask=layer_mask, return_cell_ids=True)
         if len(V) == 0:
             return None
         vs = np.empty(len(V))
         for c in range(3):
             vs[T[:, c]] = S
-        if sc["kind"] == "discrete":
-            pal = np.array([_hex2rgb(h) for h in sc["colors"]])
-            rgb = pal[np.clip(vs.astype(int) - sc["first"], 0, len(pal) - 1)].round().astype(np.uint8)
-        else:
-            rgb = colorize(vs, sc["vmin"], sc["vmax"], sc["stops"])
+        rgb = _property_colors(vs, sc)
         ox, oy = self.off(V[:, 0], V[:, 1])
         pos = np.column_stack([ox, oy, V[:, 2]]).astype(np.float32)
         nf = len(V) // 4
         q = np.arange(nf)[:, None] * 4
         wire = np.hstack([q, q + 1, q + 1, q + 2, q + 2, q + 3, q + 3, q]).reshape(-1)
+        raw, unit = grid_property_values(grid, prop, props)
         return self.add(dict(name=name, group=group, type="mesh", pos=b64(pos, np.float32), idx=b64(T, np.uint32),
                              col=b64(rgb, np.uint8), wire=b64(wire, np.uint32), color=theme.BLUE, opacity=opacity,
+                             cell_ids=b64(ids, np.uint32), cell_values=b64(raw.ravel()[ids], np.float64),
+                             grid_shape=[grid.nk, grid.nj, grid.ni], property=prop, property_unit=unit,
                              legend=legend), pos)
 
+    def property_fence(self, grid, prop, points, props, name="Property fence", layer_mask=None, display=None):
+        """Property-colored, pickable cell ribbons along an open world-coordinate fence."""
+        from core import gridsection as gs
+        raw, unit = grid_property_values(grid, prop, props)
+        values = np.where(np.asarray(layer_mask)[:, None, None], raw, np.nan) if layer_mask is not None else raw
+        section = gs.fence_property_section(grid, values, points)
+        ids = section["cell_ids"]
+        if not len(ids):
+            return None
+        scale, legend = grid_property(grid, prop, props, display)
+        rgb = np.repeat(_property_colors(scale["values"].ravel()[ids], scale), 4, axis=0)
+        ox, oy = self.off(section["world_x"].ravel(), section["world_y"].ravel())
+        pos = np.column_stack((ox, oy, section["z"].ravel())).astype(np.float32)
+        q = np.arange(len(ids), dtype=np.uint32)[:, None] * 4
+        triangles = np.stack((np.hstack((q, q + 1, q + 2)), np.hstack((q, q + 2, q + 3))), axis=1).reshape(-1, 3)
+        wire = np.hstack((q, q + 1, q + 1, q + 2, q + 2, q + 3, q + 3, q)).ravel()
+        return self.add(dict(name=name, group="Property intersections", type="mesh", color=theme.BLUE, opacity=1.,
+                             pos=b64(pos, np.float32), idx=b64(triangles, np.uint32), col=b64(rgb, np.uint8),
+                             wire=b64(wire, np.uint32), cell_ids=b64(np.repeat(ids, 2), np.uint32),
+                             cell_values=b64(np.repeat(raw.ravel()[ids], 2), np.float64),
+                             grid_shape=[grid.nk, grid.nj, grid.ni], property=prop, property_unit=unit, legend=legend), pos)
 
-def grid_property(grid, prop: str, props=None):
+
+def grid_property_values(grid, prop, props=None):
+    """Raw values for inspection (never colour clipping or log-transformed)."""
+    if props and prop in props:
+        return np.asarray(props[prop].values, float), props[prop].unit
+    if prop == "Zone":
+        return grid.zone_layer_array().astype(float), ""
+    if prop == "Fault block":
+        return grid.block_array().astype(float), ""
+    if prop == "Layer (k)":
+        return np.broadcast_to(np.arange(1, grid.nk + 1)[:, None, None], grid.actnum.shape).astype(float), ""
+    if prop == "Depth":
+        return grid.center_depth(), un.z()
+    if prop == "Thickness":
+        return grid.thickness(), un.z()
+    return grid.property_array(prop), "mD" if prop.startswith("PERM") else ""
+
+
+def grid_property(grid, prop: str, props=None, display=None):
+    scale, legend = _grid_property_default(grid, prop, props)
+    settings = (display or {}).get(prop, {})
+    if not settings:
+        return scale, legend
+    if scale["kind"] == "discrete":
+        palette = display_stops(settings, WEBVIZ_CATEGORIES)
+        codes = scale.get("codes", np.arange(len(scale["colors"])) + scale["first"])
+        overrides = settings.get("categories", {})
+        colors = [display_stops({"stops": [overrides[str(code)]] * 2}, palette)[0]
+                  if str(code) in overrides else palette[i % len(palette)] for i, code in enumerate(codes)]
+        scale["colors"] = colors
+        legend["items"] = [dict(item, color=color) for item, color in zip(legend["items"], colors)]
+    else:
+        scale["stops"] = display_stops(settings, scale["stops"])
+        legend["colors"] = scale["stops"]
+    return scale, legend
+
+
+def _grid_property_default(grid, prop: str, props=None):
     """-> (dict(values, kind, ...), legend) for a cell property of a CPGrid (``props``: user Property objects)."""
     act = grid.actnum > 0
     if props and prop in props:
         pr_ = props[prop]
-        v = np.nan_to_num(pr_.values.astype(float), nan=0.0)
+        v = pr_.values.astype(float)
         if pr_.kind == "discrete":
-            codes = np.unique(v[act]).astype(int) if act.any() else np.array([0])
+            finite = v[act & np.isfinite(v)]
+            codes = np.unique(finite).astype(int) if finite.size else np.array([0])
             if len(codes) <= 24:
-                lo = int(codes.min())
-                cols = [theme.PALETTE[(c - lo) % len(theme.PALETTE)] if c in codes else "#CCCCCC" for c in range(lo, int(codes.max()) + 1)]
-                return (dict(values=v, kind="discrete", colors=cols, first=lo),
-                        dict(title=prop, items=[dict(color=cols[c - lo], label=str(c)) for c in codes]))
+                cols = [WEBVIZ_CATEGORIES[i % len(WEBVIZ_CATEGORIES)] for i in range(len(codes))]
+                return (dict(values=v, kind="discrete", colors=cols, codes=codes, first=int(codes[0])),
+                        dict(title=prop, items=[dict(color=c, label=str(code)) for c, code in zip(cols, codes)]))
         sel = v[act & np.isfinite(pr_.values)]
         lo, hi = (float(np.percentile(sel, 1)), float(np.percentile(sel, 99))) if sel.size else (0.0, 1.0)
         if hi - lo < 1e-12:
             hi = lo + 1e-9
-        return dict(values=v, kind="cont", vmin=lo, vmax=hi, stops=SEQ_STOPS), legend_ramp(prop + (f" ({pr_.unit})" if pr_.unit else ""), lo, hi, SEQ_STOPS, "{:.3g}")
+        stops = property_stops(prop)
+        if prop.upper().startswith("PERM"):
+            v = np.where(v > 0, np.log10(np.maximum(v, 1e-3)), np.nan)
+            lo, hi = np.log10(max(lo, 1e-3)), np.log10(max(hi, 1e-3))
+        title = ("log10 " if prop.upper().startswith("PERM") else "") + prop
+        return dict(values=v, kind="cont", vmin=lo, vmax=hi, stops=stops), legend_ramp(title + (f" ({pr_.unit})" if pr_.unit else ""), lo, hi, stops, "{:.3g}")
     if prop == "Zone":
         n = len(grid.zones)
-        cols = [theme.ZONE_COLORS[k % len(theme.ZONE_COLORS)] for k in range(n)]
+        cols = [WEBVIZ_CATEGORIES[k % len(WEBVIZ_CATEGORIES)] for k in range(n)]
         return (dict(values=grid.zone_layer_array().astype(float), kind="discrete", colors=cols, first=1),
                 dict(title="Zone", items=[dict(color=c, label=z.name) for c, z in zip(cols, grid.zones)]))
     if prop == "Fault block":
         v = grid.block_array().astype(float)
         nb = int(v.max())
-        cols = [theme.PALETTE[k % len(theme.PALETTE)] for k in range(nb)]
+        cols = [WEBVIZ_CATEGORIES[k % len(WEBVIZ_CATEGORIES)] for k in range(nb)]
         return (dict(values=v, kind="discrete", colors=cols, first=1),
                 dict(title="Fault block", items=[dict(color=c, label=f"Block {k + 1}") for k, c in enumerate(cols)]))
     if prop == "Layer (k)":
         v = np.broadcast_to(np.arange(1, grid.nk + 1)[:, None, None], (grid.nk, grid.nj, grid.ni)).astype(float)
-        return dict(values=v, kind="cont", vmin=1, vmax=grid.nk, stops=DEPTH_STOPS), legend_ramp("Layer k", 1, grid.nk, DEPTH_STOPS)
+        stops = property_stops(prop)
+        return dict(values=v, kind="cont", vmin=1, vmax=grid.nk, stops=stops), legend_ramp("Layer k", 1, grid.nk, stops)
     if prop == "Depth":
         v = grid.center_depth()
         lo, hi = (float(v[act].min()), float(v[act].max())) if act.any() else (0.0, 1.0)
-        return dict(values=v, kind="cont", vmin=lo, vmax=hi, stops=DEPTH_STOPS), legend_ramp(f"Depth ({un.z()})", lo, hi, DEPTH_STOPS)
+        stops = property_stops(prop)
+        return dict(values=v, kind="cont", vmin=lo, vmax=hi, stops=stops), legend_ramp(f"Depth ({un.z()})", lo, hi, stops)
     if prop == "Thickness":
         v = grid.thickness()
         hi = float(np.percentile(v[act], 99)) if act.any() else 1.0
-        return dict(values=v, kind="cont", vmin=0.0, vmax=hi, stops=THICK_STOPS), legend_ramp(f"dz ({un.z()})", 0.0, hi, THICK_STOPS, "{:.1f}")
+        stops = property_stops(prop)
+        return dict(values=v, kind="cont", vmin=0.0, vmax=hi, stops=stops), legend_ramp(f"dz ({un.z()})", 0.0, hi, stops, "{:.1f}")
     v = grid.property_array(prop)
     title = prop
     if prop.startswith("PERM"):
@@ -312,4 +434,5 @@ def grid_property(grid, prop: str, props=None):
     lo, hi = (float(v[act].min()), float(v[act].max())) if act.any() else (0.0, 1.0)
     if hi - lo < 1e-9:
         hi = lo + 1e-9
-    return dict(values=v, kind="cont", vmin=lo, vmax=hi, stops=SEQ_STOPS), legend_ramp(title, lo, hi, SEQ_STOPS, "{:.2f}")
+    stops = property_stops(prop)
+    return dict(values=v, kind="cont", vmin=lo, vmax=hi, stops=stops), legend_ramp(title, lo, hi, stops, "{:.2f}")

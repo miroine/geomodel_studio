@@ -23,15 +23,19 @@ In **Digitize a map**, enter each contour's depth or set a nonzero **Depth step*
 Select a contour in **Contents** to correct its depth, then **Send to Python** again. Equal depths produce a constant map and trigger a warning.
 **Show model boundary** overlays the project's boundary polygon on the digitizer (calibrate scanned images first); the gridded map has a separate boundary toggle.
 
-## The object tree (sidebar)
-Input data: **Surfaces, Polygons, Faults, Wells, Well tops** - Models: **Structural model, Zones, 3D grid**. Click an object to open its page with that object selected;
-the dot shows whether a model object is built. Top buttons: Project, 3D window, Export.
+## Navigation
+The sidebar is grouped by the modeling workflow: **Workspace**, **Build**, **Model**, and **Review & deliver**. Expand a stage to open its pages.
+The sidebar's **Model** pane has connected, numbered boxes: **Horizon & fault framework -> Zones & layering ->
+Build the 3D grid -> Populate the reservoir**. Each box explains its input/output and shows readiness.
+Existing page links and object selections remain available inside each box. The property stage shows
+**Facies -> petrophysics -> water saturation -> QC**, followed by review, volumetrics and export.
+When a page has project objects, their names appear beneath it; select one to open that object directly. The symbol beside an object indicates whether it is ready, missing, or stale.
 
 ## What each page does
 | Page | Capabilities |
 |---|---|
 | Project | model lattice, demo, save / open `.gmsz` (keeps raw maps, filter stacks with undo history, presets, polygons, wells) |
-| Surfaces | import ESRI/Surfer ASCII, **IRAP/RMS ASCII + binary (xtgeo)**, XYZ points; gridding (min-curvature, RBF, IDW, linear); **digitize a scanned map**; synthetic surfaces; **Filter & clip** (below) |
+| Surfaces | import ESRI/Surfer ASCII, **IRAP/RMS ASCII + binary (xtgeo)**, XYZ points; gridding (min-curvature, RBF, IDW, linear); **digitize a scanned map**; synthetic surfaces; duplicate with scalar depth offset or multiplier; rename/delete unused maps (workflow source maps must be detached first); **Filter & clip** (below) |
 | Polygons | **digitize** (JS editor, drag / insert / delete vertices) or **import** (XY text, GeoJSON); export XY; pick the **model boundary**; clip surfaces to a polygon |
 | Faults | draw traces, normal / reverse, throw, dip, hanging-wall side, along-strike profile, drag zone, growth; faulted preview |
 | Wells | head table, **deviation surveys (minimum curvature)**, XYZ paths, import with templates, build / hold generator, create from tops, 3D preview |
@@ -39,8 +43,202 @@ the dot shows whether a model object is built. Top buttons: Project, 3D window, 
 | Structural model | ordered workflow: surface, isochore, **calibrate to tops**, smooth, faults; roles conformable / erosional / base-lap |
 | Zones & layering | proportional, follow top, follow base, fractions; zone properties |
 | 3D grid | vertical-pillar corner-point grid, stair-stepped faults, **cells outside the boundary polygon inactive**, WebGL cut-away + sections + checks |
+| Properties | property library, facies simulation, petrophysics by zone/facies, saturation-height and Archie water saturation, 3D/layer QC, stochastic models, well conditioning and calculator |
 | 3D window | surfaces, structural-model horizons, fault planes, polygons, wells, tops, grid coloured by Zone / Layer / Block / Depth / Thickness / PORO / PERMX / NTG |
 | Export | **GRDECL**, **VTK**, **ROFF / EGRID / bGRDECL via xtgeo**, surfaces, fault traces, tops, project |
+
+### Structural workflow flowchart
+The Structural model configuration uses a connected, top-to-bottom flowchart. Numbered task cards show the
+task type, **IN** data, **OUT** result and a named **Configure task** panel. Colors distinguish horizon
+construction, fault framework, well conditioning, horizon refinement, and zones/layering; they do not
+represent completion status.
+
+Use **Move up**, **Move down**, or **Delete task** on a card. Configure its parameters and press **Update step**
+to apply edits. The separate **Add a task** panel appends new tasks; **Apply faults** replaces the fault-selection
+task and places it first. Define horizons before tasks that reference them.
+**Apply faults** selects faults globally for the framework and calibration, rather than only for the next card.
+The arrows show task order, not a branching dependency graph.
+
+Press **Run workflow** in **Build & validate**, then inspect the existing 3D, maps, cross-section and zone QC.
+Applying task edits, additions, deletion or reordering invalidates the framework and grid, so rerun and rebuild
+before using the updated model. The flowchart preserves existing workflow files and numerical behavior.
+
+### Property modelling workflow
+Properties are organized into **Workflow**, **Property library**, **Facies**, **Petrophysics**, **Water saturation**, and **QC & tools**.
+The **Workflow** tab is an executable, ordered job flowchart, using the same modelling engines as the individual tools:
+**Facies model -> Python calculator -> Petrophysics -> Water saturation**, or any order appropriate to the input dependencies.
+Use **Insert job** and its position selector to insert a calculator between two jobs; **Move up / Move down** reorders jobs.
+Untick **Active** to skip a job entirely, including its configuration validation. Downstream active jobs must still have
+their required inputs, either from an earlier active job or from existing current properties.
+
+Each job has a named **Configure job** panel and its own saved configuration snapshot. **Save job configuration**
+applies edits; the individual Facies/Petrophysics tools are retained and do not modify saved jobs automatically.
+In **Facies**, use **Facies modelling job** to choose a named workflow job and edit its actual saved configuration,
+or select **Standalone facies settings** for the independent tool. Multiple facies jobs keep separate configurations;
+new jobs receive unique names and facies output names. Saved edits refresh both the flowchart and named-job editor.
+Use descriptive job names and choose the corresponding facies output as the input to downstream petrophysics jobs.
+The same named-job selection is available in **Petrophysics -> Zone / facies parameters**, **Stochastic by zone / facies**,
+**Water saturation**, and **QC & tools -> Calculator**. Each selector shows only that tool's saved workflow jobs.
+Configure and save the selected job there, run it alone with **Run this job**, or execute its saved settings in the ordered
+workflow. Selecting standalone settings preserves the independent tools; it does not copy or overwrite a named job.
+Calculator jobs use the existing restricted array calculator, not arbitrary Python: for example
+`FACIES = where(FACIES == 2, 3, FACIES)` before a zone/facies petrophysics job.
+Set the calculator result type to **discrete** for facies, and configure parameter rows for any newly created codes.
+Rows for declared but absent facies are skipped at execution; missing rows for actual active codes produce an error.
+Geometry variables remain read-only, and stale calculator inputs are rejected.
+
+**Run property workflow** executes all active jobs. Approve replacing existing outputs when needed.
+Every card also has **Run this job**: it runs only that saved job using current stored properties, without running
+upstream jobs. An explicit standalone run works even when **Active** is unticked; Active only controls workflow inclusion.
+Approve standalone output replacement separately. Missing/stale inputs fail explicitly and leave existing outputs unchanged.
+Outputs are committed only if every active job succeeds; errors identify the failing job and leave existing properties
+unchanged. The run table distinguishes **Completed** and **Skipped** jobs. Editing or disabling jobs does not remove
+previously stored properties; rerun to update those snapshots. Jobs, activation, order, parameter tables and scripts
+are saved in `.gmsz`; older projects start with an empty job list. Physical job ranges/contact depths convert with
+project units; numeric constants inside calculator scripts must be reviewed manually after a unit change.
+
+The sidebar uses colored object-family borders, green created/current objects and orange stale objects. Cell properties
+are in the **3D properties** dropdown instead of a long list of buttons; selecting one opens its property viewer.
+
+### Display colours and cell investigation
+Use **Edit property colours** in property QC or the Grid page, **Scene content** in the 3D window,
+or **Edit fence property colours** for intersections. Choose Webviz **Physics**, **Physics reverse** or
+**Colors set 3**, a shallow-red/deep-blue depth ramp, or Viridis. Edit individual colour stops and,
+for categorical properties, individual facies/code colours; press **Save colours**. **Reset to automatic colours**
+restores the property-specific defaults. Settings are saved with the project, survive rerunning a same-named
+modelling job, and are shared by grid/fence displays, layer maps, analysis sections and average maps.
+Permeability colours remain log10-scaled; hover and inspection retain raw values.
+
+**Grid opacity** controls transparency in Grid, Properties QC, the main 3D window, and the surrounding grid
+of a fence scene. Lower values reveal well context behind the outer grid skin; transparency does not create
+interior cell faces. Use cut-away/layer filters or a fence to expose interior cells. The viewer's object-tree
+opacity slider remains available, and explicit Python opacity changes apply to an already-open viewer.
+
+Click a grid face or fence ribbon to open **Other properties at selected cell**. Select which properties to compare
+at the same original global I/J/K. The table includes raw values, units, categorical labels, and explicit
+undefined/stale status rather than showing incompatible snapshots as current values.
+
+Surface maps now default to depth colours (red shallow, blue deep), matching the 3D depth convention.
+In **Surfaces -> Library -> Map**, choose a map surface, toggle **Show depth contours**, set the contour interval
+in project depth units (0 = automatic), and optionally label contours. **Show well trajectories** overlays
+plan-projected deviated/vertical well paths and labelled wellheads; hover shows trajectory depth, not a calculated
+surface crossing. Surface depth palettes are editable and saved under **Edit surface depth colours**.
+These map controls are also available for structural-model depth results. Rotated input maps are resampled
+for display onto a bounded north-up lattice so contours and world-coordinate well paths align; source data are unchanged.
+
+### Fluvial channel objects
+Choose the **objects** facies method in a named job or the standalone Facies tool. The object table supports
+**ellipsoid**, **channel**, and **digitized_channel** shapes, mixed in the same model.
+For parametric **channel** objects, configure centerline length, width, thickness, azimuth, meander amplitude and wavelength.
+Azimuth is measured from north; amplitude is lateral displacement, not a sinuosity ratio. Zero amplitude gives a straight channel.
+For **digitized_channel**, draw one open XY centerline per object row in the embedded map, finish with Enter and press
+**Apply**, then **Save job configuration**. Add another object row for another path. The path stays fixed in world coordinates,
+including on rotated grids; length, azimuth, amplitude and wavelength are unused for that shape.
+
+Channels have a rounded cross-section and are placed at random depths within each zone, clipped to active cells.
+Width/thickness vary per realization; generated channels also vary in length, position, orientation and meander phase.
+Zone proportions are approximate bulk-volume targets for the object facies, not exact channel counts. Later bodies can overwrite
+earlier ones. If channel placement cannot reach its target within the attempt limit, an explicit error suggests reducing the
+target or increasing coverage. Features smaller than the cell spacing may not be resolved. Channel models are not well-conditioned
+and do not include levees, avulsion or erosion simulation. Parameters and digitized paths persist in `.gmsz` and convert with project units.
+
+### Water-saturation contacts
+Saturation-height jobs and the standalone Water saturation tool allow **WOC / OWC** (water/oil contact),
+optional **GOC** (gas/oil contact), **FWL below OWC** (a finite, non-negative depth offset), fault-block overrides,
+zone/discrete-region overrides and tilted contacts.
+Depth is positive down: GOC must be shallower than OWC. Blank override values inherit the global or block setting.
+Named jobs keep their own contact snapshots; standalone contacts are shared with Volumetrics.
+
+For either contact, select **3D property** as its source and specify an existing continuous contact-depth property,
+or an output of an earlier calculator job. Contact properties must fit the grid, be current and finite in active cells;
+their values override configured contacts and tilt. A blank unit means the project depth unit; specified length units
+are converted when used. Scenario contact shifts remain supported. The same contact inputs are honoured by Volumetrics
+and fluid classification; missing or invalid contact properties produce explicit errors.
+
+Enable **Separate gas-zone saturation-height parameters** to set `gas_swirr`, `gas_entry` and `gas_lam` by the selected
+zone/facies domains. These parameters apply only above GOC, using height above the same water FWL; the normal curve
+applies in the oil leg. Below FWL, water saturation is 1. This is a configurable empirical water-saturation curve,
+not a gas/oil capillary-pressure or three-phase saturation solver. Archie remains resistivity-based and does not use contacts.
+
+### Property fence intersections and average maps
+Open **Properties -> QC & tools -> 3D & maps -> Fence intersections** to draw/edit shared project fences and select
+up to three properties for stacked cross-sections. Filter zones/layers, overlay project contacts or a named saturation
+job's contacts, and download the intersected cell values with their original I/J/K and along-fence distances as CSV.
+The **Fence intersection in 3D** panel renders a property-colored curtain with optional black edges and surrounding
+grid context. Click a ribbon to inspect its raw property value and original I/J/K.
+Column crossings are exact in the grid's plan-view frame, including rotated/refined grids; ribbon top/base depths are
+column-corner averages, not exact intersections through tilted pillars. Structural fences and saved projects reuse the same paths.
+
+In **Average maps**, select one or several current continuous properties, zones and a layer interval. Choose
+**Arithmetic**, **Thickness-weighted**, or **Bulk-volume-weighted** averages of finite active cells in each column.
+No implicit NTG multiplier is applied. Empty columns stay undefined; discrete facies codes are not averaged.
+Maps display in I/J space and download as CSV with world X/Y coordinates, values and contributing cell counts.
+These are derived results, not new 3D property snapshots. The multi-parameter map controls are also available in
+**Analysis & sections -> Maps -> Generate average maps for multiple parameters**.
+
+### Property colors and cell inspection
+The 3D grid uses color tables from
+[Webviz subsurface](https://github.com/equinor/webviz-subsurface/blob/master/webviz_subsurface/plugins/_well_log_viewer/utils/default_color_tables.py):
+**Physics** for SW/SWAT, Depth and Layer; **Physics reverse** for other continuous properties; and
+**Colors_set_3** for Zone, Fault block and discrete properties. Categorical colors cycle after 10 colors;
+user discrete properties with more than 24 codes use a continuous ramp. Undefined values are gray.
+User continuous properties use active-cell 1st/99th-percentile display limits. Permeability colors use a
+logarithmic scale; inspection still shows the original value.
+
+Enable **Black mesh edges** in the 3D grid/window controls or **Properties -> QC & tools -> 3D & maps ->
+3D display filters and well context**. This draws black cell outlines without replacing property colors.
+Click a visible grid face without dragging to inspect its global, 1-based **I/J/K**, selected property value
+and unit in the viewer overlay and caption below it. Cut-away and layer/zone filters preserve original cell
+indices; expose an interior cell with these controls before selecting it. Invalid or stale selections are rejected.
+
+All results are ordinary grid properties: they can be viewed in the 3D window, used by the calculator and volumetrics,
+and included in simulator exports. Object-tree selection opens the selected property in the property viewer.
+
+1. Build the grid and optionally create/import a discrete **FACIES** property.
+2. In **Petrophysics > Zone / facies parameters**, choose **By zone**, **By facies**, or **By zone and facies**.
+   Enter porosity and NTG as fractions, horizontal permeability in mD, and PERMY/PERMX and PERMZ/PERMX ratios.
+   The table assigns **constant values within each active domain**; select which outputs to store and confirm replacements.
+   Use **Stochastic by zone / facies** or the existing **Facies > Petrophysics per facies** simulation step for spatially varying
+   distributions and variogram-based continuity. Parameter-table assignments do not modify the grid zone-definition table.
+   In **Stochastic by zone / facies**, choose **By zone and facies** and select a current discrete facies property.
+   PORO, PERM and NTG each have separate histogram parameters and variograms for every active zone/facies combination.
+   Initial normal PORO/NTG and lognormal PERM parameters use the facies petrophysics table when available; otherwise zone settings
+   are copied as editable starting values. Set these rows to the required facies distributions before running.
+   Facies membership comes from the selected property, not from zone labels. Histogram ranking, assignment,
+   blocked-well conditioning and facies-filtered QC respect that membership; inactive outputs are undefined.
+   Domains are simulated independently with reproducible seeds. Distribution type, cross-correlations, poroperm
+   transform and cut-offs remain workflow-wide; vertical permeability ratios remain zone-based.
+   Facies-domain tables and the selected source are saved in the project; switching back to **By zone** retains
+   the original zone tables and legacy numerical behavior. Missing, stale or undefined active facies are rejected.
+3. In **Water saturation**, choose a method and the same zone/facies domain options:
+   - **Saturation-height:** `Sw = Swirr + (1 - Swirr) * (entry / max(height, entry))^lambda`.
+     Height is above the free-water level at the cell centre; `Sw = 1` below the FWL.
+     OWC and FWL-below-OWC are shared with Volumetrics, including its fault-block/region contact overrides and tilt.
+     Entry height and contact depths use the **project depth unit**; entry-height settings convert with project units.
+   - **Archie:** `Sw = (a * Rw / (PORO^m * Rt))^(1/n)`, clipped to `[0, 1]`.
+     Select separate porosity (fraction) and formation-resistivity **Rt** (ohm.m) properties; enter `a`, `m`, `n`, and **Rw**
+     (ohm.m) per domain. Resistivity can be imported/conditioned through the well-log tools or created with the calculator.
+     Archie assumes a clean formation, not a shaly-sand model; calibrate these parameters to well and laboratory data.
+4. Store **SW**, inspect **QC & tools > 3D & maps** (zone/layer filters, wells/tops and layer histograms), then select
+   **Use SW in volumetrics** or include SW in grid exports.
+
+Parameter tables and generated properties are saved in `.gmsz` projects, including older-project compatibility.
+Models reject missing/stale inputs, undefined active-cell values, incomplete domain tables and invalid parameters.
+Inactive cells remain undefined. Stored results are **snapshots**: rerun models after changing inputs, contacts or
+parameters, and rebuild properties flagged stale after geometry changes. These workflows support concept modelling;
+they do not reproduce every Petrel property-modelling process.
+
+### Save surfaces
+After **Add to library**, **Grid points into a surface**, **Grid digitized data**, or **Create surface**, use
+**Save surface file** in the same tab. Choose **IRAP binary**, **IRAP ASCII**, or **XYZ points**.
+The download stays available across reruns, including when you change the file format.
+**Library & QC > Surface to save** can download any library surface, including duplicates and filtered maps.
+Surface downloads use the current project XY/depth units (depth positive down); these formats do not preserve the project CRS.
+XYZ exports only defined nodes; IRAP preserves the regular-grid geometry and undefined nodes.
+
+Use **Save complete project (.gmsz)** in the library to keep all surfaces, raw maps, filter history, digitized contours,
+and project settings together. Surface files save the current map only, not its editable filter history.
+Downloads are explicit browser saves, not automatic disk persistence; save a file or project before ending your session.
 
 ### Filter & clip (per surface, non-destructive)
 The raw map is never overwritten. Each surface has an ordered stack of operations you can **add, edit, switch on/off, reorder and delete**:
@@ -56,6 +254,15 @@ The same controls are available in **3D grid > 3D cut-away**. Layers use global 
 Filtering exposes the selected cells' outer faces and works with I/J cuts without changing active cells, properties, exports, or other scene objects.
 
 ### Drawing faults
+
+Faulted horizons in the Faults preview, structural results and 3D window are split at fault crossings:
+triangles no longer bridge the depth jump into a continuous ramp. Cuts use the unfaulted horizon depth
+to locate dipping faults and the applied throw/slip profile (including growth and tapered tips).
+Hiding fault planes does not reconnect the horizon. Library surfaces and the **Unfaulted** preview
+remain continuous. The visible gap follows the display mesh resolution, including downsampling;
+it is not extra throw or a physical heave gap, and does not alter saved surfaces or grid exports.
+For physical horizontal separation, use the fault's **heave** parameter. After editing faults, rerun
+the structural workflow and rebuild the grid to update the modeled results.
 Open **Faults**, select a backdrop surface, then choose **Draw fault** (selected automatically when no faults exist).
 Click vertices along the trace and double-click the final vertex or press **Enter** to finish. Set throw, dip and hanging-wall side in the panel,
 then press **Apply to model**. Run the structural workflow again to update faulted horizons, and rebuild the grid to use the new faults.
@@ -146,7 +353,7 @@ Limits: volumetrics ignore the part of a cell below the OWC by linear interpolat
 
 ## Planes, regions, fluid split and simulator formats (v3.2)
 
-**Planes & regions** (Properties page, last tab).
+**Planes & regions** (Properties > QC & tools > Planes & regions).
 - *Horizontal planes to properties*: give planes a name and a depth (or use the volumetrics contacts). Per plane you get `HAP_<name>` (height above the plane, positive above), `FRAC_<name>` (fraction of the cell above the plane) and one discrete `PLANE_REGION` numbering the slabs between the planes. The contact button writes `OWC_DEPTH`, `GOC_DEPTH`, `HAOWC`, `HAGOC` and `FLUID`.
 - *Fault-block region and segments*: `FAULT_BLOCK` and `REGION` (the fault-block number) and `SEGMENT` (numbered combinations that contain active cells: fault block, zone x block, or zone x block x fluid). Discrete properties carry a legend (value -> name) that is saved with the project and used in tables and plots.
 
@@ -161,13 +368,13 @@ Limits: volumetrics ignore the part of a cell below the OWC by linear interpolat
 
 ## Well logs, contacts by region, fault transmissibility, inclined pillars, structural uncertainty, upscaling (v3.3)
 
-**Well logs and conditioning** (Properties > *Well logs & kriging*).
+**Well logs and conditioning** (Properties > QC & tools > *Well logs & kriging*).
 - Load LAS 2.0 files (one per well, `WRAP = NO`, MD in the project depth unit from KB). MD is converted to XYZ with the cumulative length of the well path (minimum curvature for survey wells).
 - *Block* a curve into the grid: arithmetic, harmonic or geometric mean per cell (continuous) or the most frequent value (discrete); cells without data are NaN and the result is stored as a property with source "blocked wells". Rotated and tilted grids are handled.
 - Experimental horizontal (same layer) and vertical (same column) variograms of the blocked data with a brute-force fit of range and nugget; one button copies the fitted ranges into the stochastic setup.
 - *Simple kriging* in the normal-score domain per zone (nearest-neighbour search, batched solves). Stochastic workflow step 4 *Condition to wells*: the Gaussian field is conditioned by kriging and the data are honoured exactly in their cells. Permeability derived from porosity is not conditioned directly.
 
-**Facies modelling** (Properties > *Facies modelling*).
+**Facies modelling** (Properties > *Facies*).
 - *Truncated Gaussian*: ordered facies (table order = spatial neighbourhood), proportions per zone with an optional vertical trend from top to base, variogram per zone, conditioning to a blocked discrete facies log (kriging of the Gaussian field, data honoured exactly), "use well proportions" shortcut.
 - *Volume-weighted proportions* (truncated Gaussian and plurigaussian, on by default): the Gaussian scores are ranked by cell bulk volume, so the proportions hold by volume rather than by cell count.
 - *Plurigaussian*: two independent Gaussian fields (own variogram each) and an editable rectangular truncation rule (rows = bands of G1, columns = bands of G2, cells = facies codes); band widths are solved from the proportions, and a rule that cannot reproduce them is reported. Not conditioned to wells, no vertical trend.

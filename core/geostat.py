@@ -1,7 +1,7 @@
 """Stochastic property modelling on the 3D grid: Gaussian random fields with a variogram, target histograms,
 cross-correlation and net / gross cut-offs.
 
-Workflow (per zone, per realisation)
+Workflow (per zone or zone/facies domain, per realisation)
 ------------------------------------
 1. For every simulated property (PORO, PERM, NTG) draw an independent standard-normal random field with the
    zone's variogram (spherical / exponential / gaussian, major / minor / vertical range, azimuth, nugget).  The
@@ -16,7 +16,8 @@ Workflow (per zone, per realisation)
    the binary net flag.  PERMY = kykx * PERMX and PERMZ = kvkh(zone) * PERMX.
 
 Limits: spacings use the mean cell size (non-uniform / refined grids are treated as uniform in the field
-generation), zones are simulated independently (no continuity across zone boundaries), no conditioning to wells.
+generation), domains are simulated independently (no continuity across zone/facies boundaries).
+Optional blocked-well conditioning uses only samples in the current domain.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from scipy.fft import next_fast_len
 from scipy.special import ndtri, ndtr
+from . import petrophysics as petro
 
 VARIOGRAMS = ["spherical", "exponential", "gaussian"]
 DISTS = ["normal", "lognormal", "uniform", "triangular", "histogram", "values"]
@@ -183,6 +185,37 @@ def corr_matrix(cfg: dict, names: List[str]) -> np.ndarray:
     return R
 
 
+def facies_rows(grid, cfg, properties, facies_name, defaults=()):
+    """Reconcile saved zone/facies rows with active domains without changing zone-only parameters."""
+    try:
+        domains = petro.domains(grid, "zone_facies", properties, facies_name)
+    except petro.PetroError as exc:
+        raise GeostatError(str(exc)) from exc
+    if not domains:
+        raise GeostatError("The grid has no active facies domains.")
+    for name in PROPS:
+        pc = cfg["props"][name]
+        saved = {(r["zone"], r["code"]): r for r in pc.get("facies_rows", [])
+                 if pc.get("facies_source") == facies_name}
+        rows = []
+        for domain in domains:
+            zone = grid.zones[domain["zone"] - 1].name
+            row = dict(next(r for r in pc["rows"] if r["zone"] == zone))
+            initial = next((r for r in defaults if r["code"] == domain["code"]), None)
+            if initial:
+                if name == "PORO" and pc["dist"] == "normal":
+                    row.update(p1=initial["poro"], p2=initial["poro_sd"])
+                elif name == "PERM" and pc["dist"] == "lognormal":
+                    row.update(p1=10 ** initial["logk"], p2=initial["logk_sd"] * np.log(10))
+                elif name == "NTG" and pc["dist"] == "normal":
+                    row.update(p1=initial["ntg"])
+            row.update(saved.get((zone, domain["code"]), {}))
+            row.update(zone=zone, code=domain["code"], facies=domain["label"])
+            rows.append(row)
+        pc.update(facies_rows=rows, facies_source=facies_name)
+    return domains
+
+
 def check_config(cfg: dict) -> List[str]:
     errs = []
     names = [p for p in PROPS if cfg["props"][p]["enabled"]]
@@ -196,7 +229,8 @@ def check_config(cfg: dict) -> List[str]:
         if np.linalg.eigvalsh(R).min() < 1e-9:
             errs.append("The correlation matrix is not positive definite - lower the correlations (e.g. PORO-PERM and PORO-NTG high needs PERM-NTG high as well).")
     for n in names:
-        for r in cfg["props"][n]["rows"]:
+        row_key = "facies_rows" if cfg.get("domain", "zone") == "zone_facies" else "rows"
+        for r in cfg["props"][n].get(row_key, []):
             if r["simulate"] and (r["major"] <= 0 or r["minor"] <= 0 or r["vert"] <= 0):
                 errs.append(f"{n} / {r['zone']}: variogram ranges must be positive.")
             if r["vmax"] <= r["vmin"]:
@@ -205,7 +239,7 @@ def check_config(cfg: dict) -> List[str]:
 
 
 # ---------------------------------------------------------------- the workflow
-def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray]] = None) -> Dict[str, dict]:
+def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray]] = None, properties=None) -> Dict[str, dict]:
     """Run the stochastic workflow.  Returns {name: dict(values (nk,nj,ni), kind, unit)} for all realisations.
 
     ``cond`` = {"PORO"|"PERM"|"NTG": blocked-well array (nk,nj,ni), NaN = no data} conditions the realisations: the Gaussian
@@ -217,6 +251,24 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
         raise GeostatError(" ".join(errs))
     shape = (grid.nk, grid.nj, grid.ni)
     act = grid.actnum > 0
+    mode = cfg.get("domain", "zone")
+    if mode not in ("zone", "zone_facies"):
+        raise GeostatError(f"Unknown stochastic domain: {mode}")
+    facies = None
+    if mode == "zone_facies":
+        try:
+            facies = petro.property_values(grid, properties or {}, cfg.get("facies", ""), discrete=True)
+            domains = petro.domains(grid, mode, properties or {}, cfg.get("facies", ""))
+        except petro.PetroError as exc:
+            raise GeostatError(str(exc)) from exc
+        expected = {(grid.zones[d["zone"] - 1].name, d["code"]) for d in domains}
+        if not expected:
+            raise GeostatError("The grid has no active facies domains.")
+        for name in PROPS:
+            pc = cfg["props"][name]
+            supplied = [(q.get("zone"), q.get("code")) for q in pc.get("facies_rows", [])]
+            if pc.get("facies_source") != cfg.get("facies") or len(set(supplied)) != len(supplied) or set(supplied) != expected:
+                raise GeostatError(f"{name}: parameter rows must cover every active zone/facies domain exactly once.")
     th = grid.thickness()
     dx, dy = float(np.mean(np.diff(grid.xs))), float(np.mean(np.diff(grid.ys)))
     names = [p for p in PROPS if cfg["props"][p]["enabled"]]
@@ -227,15 +279,24 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
     for r in range(nreal):
         sfx = f"_R{r + 1}" if nreal > 1 else ""
         vals = {n: np.full(shape, np.nan) for n in names}
-        for zi, z in enumerate(grid.zones):
+        jobs = [(zi, z, None) for zi, z in enumerate(grid.zones)] if facies is None else [
+            (d["zone"] - 1, grid.zones[d["zone"] - 1], d["code"]) for d in domains]
+        for job, (zi, z, code) in enumerate(jobs):
             ks = np.where(grid.layer_zone == zi)[0]
             if ks.size == 0:
                 continue
             am = act[ks]
+            if facies is not None:
+                am = am & (facies[ks] == code)
             dz = float(th[ks][am].mean()) if am.any() else 1.0
             dz = max(dz, 1e-3)
-            rows = {n: next((q for q in cfg["props"][n]["rows"] if q["zone"] == z.name), None) for n in names}
-            ss = np.random.SeedSequence([int(cfg["seed"]), r, zi])
+            row_key = "rows" if facies is None else "facies_rows"
+            rows = {n: next((q for q in cfg["props"][n][row_key]
+                            if q["zone"] == z.name and (facies is None or q["code"] == code)), None) for n in names}
+            seed = [int(cfg["seed"]), r, zi]
+            if code is not None:
+                seed.append(int(code) % (2 ** 32))
+            ss = np.random.SeedSequence(seed)
             gens = [np.random.default_rng(s) for s in ss.spawn(len(PROPS) + 1)]
             fields = {}
             for n in names:
@@ -260,7 +321,7 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
                     if arr is None or (n == "PERM" and tmode):
                         continue
                     sub_ = arr[ks]
-                    kk, jj, ii = np.where(~np.isnan(sub_))
+                    kk, jj, ii = np.where(~np.isnan(sub_) & am) if facies is not None else np.where(~np.isnan(sub_))
                     if kk.size == 0:
                         continue
                     d = sub_[kk, jj, ii].astype(float)
@@ -284,7 +345,11 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
                         raise GeostatError("Permeability from porosity needs PORO simulated in every zone.")
                     v = 10.0 ** (float(t["a"]) * poro + float(t["b"]) + float(t["sigma"]) * sc)
                 else:
-                    u = ndtr(fields[n]) if n in exact else rank_uniform(fields[n])
+                    if facies is not None and n not in exact:
+                        u = np.full(am.shape, 0.5)
+                        u[am] = rank_uniform(fields[n][am])
+                    else:
+                        u = ndtr(fields[n]) if n in exact else rank_uniform(fields[n])
                     v = quantile(pcfg["dist"], u, row, dict(bins=pcfg["bins"], values=pcfg["values"]))
                 v = np.clip(v, row["vmin"] if row else -np.inf, row["vmax"] if row else np.inf)
                 if n in exact:
@@ -293,9 +358,14 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
                     v[kk, jj, ii] = d
                 tmp[n] = v
             for n, v in tmp.items():
-                vals[n][ks] = v
+                if facies is None:
+                    vals[n][ks] = v
+                else:
+                    sub = vals[n][ks]
+                    sub[am] = v[am]
+                    vals[n][ks] = sub
             if progress:
-                progress((r * len(grid.zones) + zi + 1) / (nreal * len(grid.zones)))
+                progress((r * len(jobs) + job + 1) / (nreal * len(jobs)))
         for n in names:
             vals[n] = np.where(np.isnan(vals[n]), 0.0, vals[n])
         units = dict(PORO="frac", PERM="mD", NTG="frac")
@@ -334,7 +404,7 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
                     res["NTG"] = (net.astype(float), "continuous")
         for n, (v, kind) in res.items():
             u_ = {"PORO": "frac", "NTG": "frac", "NET": ""}.get(n, "mD")
-            out[n + sfx] = dict(values=v, kind=kind, unit=u_)
+            out[n + sfx] = dict(values=np.where(act, v, np.nan) if facies is not None else v, kind=kind, unit=u_)
     return out
 
 
@@ -366,6 +436,8 @@ def simple_krige(dpos: np.ndarray, dval: np.ndarray, tpos: np.ndarray, vp: dict,
     tree = cKDTree(dpos)
     m = min(nmax, nd)
     dist, idx = tree.query(tpos, k=m, distance_upper_bound=1.0)
+    if m == 1:
+        dist, idx = dist[:, None], idx[:, None]
     for a in range(0, len(tpos), chunk):
         sl = slice(a, a + chunk)
         di, ii = dist[sl], idx[sl]
@@ -486,6 +558,8 @@ def achieved_correlation(grid, values: Dict[str, np.ndarray], zone: Optional[int
     for i, a in enumerate(names):
         for b in names[i + 1:]:
             x, y = values[a][m], values[b][m]
+            finite = np.isfinite(x) & np.isfinite(y)
+            x, y = x[finite], y[finite]
             if x.size > 2 and x.std() > 0 and y.std() > 0:
                 sub = np.random.default_rng(0).choice(x.size, min(x.size, 20000), replace=False)
                 res[f"{a}-{b}"] = dict(pearson=float(np.corrcoef(x, y)[0, 1]), spearman=float(spearmanr(x[sub], y[sub])[0]))

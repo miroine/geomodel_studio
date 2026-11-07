@@ -11,6 +11,7 @@ from ui import state as S
 from ui import specs
 from ui.components import plotly_view
 from ui.theme import banner, kpis, note
+from views import property_results
 
 
 def _filters(props, g, names):
@@ -48,8 +49,11 @@ def render():
     props = dict(p.properties)
     fluid_auto = False
     if "FLUID" not in props and p.volumetrics and not V.check_config(g, p.volumetrics):   # fluid split straight from the contacts
-        props["FLUID"] = pp.make_property(g, "FLUID", V.fluid_array(g, p.volumetrics, None, p.properties), "discrete", "", "volumetrics", legend=V.FLUID_LEGEND)
-        fluid_auto = True
+        try:
+            props["FLUID"] = pp.make_property(g, "FLUID", V.fluid_array(g, p.volumetrics, None, p.properties), "discrete", "", "volumetrics", legend=V.FLUID_LEGEND)
+            fluid_auto = True
+        except V.VolError as exc:
+            st.warning(f"Fluid classification unavailable: {exc}")
     names = [n for n, v in props.items() if v.values.shape == (g.nk, g.nj, g.ni)]
     if not names:
         note("No properties yet. Generate geometric properties or populate PORO / NTG on the Properties page.", warn=True)
@@ -134,8 +138,12 @@ def render():
                 wts = tuple(st.multiselect("Extra weights (cell thickness is always used)", names, default=["NTG"] if "NTG" in names else [], key=S.k("an_mw", names)))
             mp = an.map_2d(g, props, pn, mask, md, wts)
             lbl = {"sum": f"Sum of {pn}"}.get(md, f"{pn} ({md})")
-            plotly_view(specs.layer_map(mp, lbl, pn), key=S.k("an_map") + f"{pn}{md}{wts}{int(mask.sum())}", height=420)
+            from ui import display
+            plotly_view(display.property_map(p, g, pn, mp, lbl, props[pn].unit),
+                        key=S.k("an_map") + f"{pn}{md}{wts}{int(mask.sum())}", height=420)
             st.caption("Maps are drawn in grid index space (I, J), so they are valid for rotated and refined grids. Use 'sum' on HCPV / STOIIP for an HC thickness style map.")
+            with st.expander("Generate average maps for multiple parameters"):
+                property_results.average_maps(p, prefix="an_average")
         with t6:
             _sections(p, g, names, props)
     except (an.AnalysisError, gsx.SectionError, V.VolError) as e:
@@ -176,7 +184,10 @@ def _sections(p, g, names, props):
             sec = gsx.grid_line_section(g, vals, "j" if mode == "row (J)" else "i", idx, owc, goc)
         else:
             sec = gsx.fence_property_section(g, vals, pts, list(p.faults.values()) if fl else None, owc, goc)
-        panels.append(dict(name=n, unit=pr.unit, sec=sec, discrete=pr.kind == "discrete"))
+        from ui.scene import grid_property
+        scale, _ = grid_property(g, n, props, p.display_settings.get("properties"))
+        panels.append(dict(name=n, unit=pr.unit, sec=sec, discrete=pr.kind == "discrete",
+                           scale=scale, stops=scale.get("stops", scale.get("colors"))))
     if not any(len(pn["sec"]["v"]) for pn in panels):
         note("The section contains no active cells.", warn=True)
         return

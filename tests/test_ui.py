@@ -1,5 +1,6 @@
 """Headless run of every page through a fake Streamlit (real Streamlit is not installed here)."""
 import json, os, sys, traceback
+from contextlib import contextmanager
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -88,17 +89,89 @@ finally:
 
 ok("home renders (demo)", page(home.render))
 
+# Workflow step editors use expanders; rendering map-extension settings inside
+# one must not create another Streamlit expander.
+st_module = sys.modules["streamlit"]
+original_expander = st_module.expander
+expander_depth = 0
+
+
+@contextmanager
+def checked_expander(label, expanded=False):
+    global expander_depth
+    if expander_depth:
+        raise AssertionError("nested Streamlit expanders are not supported")
+    expander_depth += 1
+    try:
+        with original_expander(label, expanded=expanded):
+            yield
+    finally:
+        expander_depth -= 1
+
+
+st_module.expander = checked_expander
+try:
+    with st_module.expander("workflow step"):
+        workflow.step_form("surface", dict(horizon="Test", surface="Top_Reservoir"), "nested_test", p)
+    ok("surface workflow step renders without nested expanders", True)
+except Exception as exc:
+    ok("surface workflow step renders without nested expanders", False, str(exc))
+finally:
+    st_module.expander = original_expander
+
 # library / import / synthetic
 ok("surfaces page (library, import, digitize, synthetic)", page(surfaces.render) and not errors(), errors())
+surface_before = p.surfaces["Top_Reservoir"].z.copy()
+fs.OVERRIDES.update({
+    "lib_dup_source": "Top_Reservoir",
+    "lib_dup_name_Top_Reservoir": "Top_Reservoir_shifted",
+    "lib_dup_value_Top_Reservoir_add": 5.0,
+})
+fs.PRESS.add("Create duplicate")
+ok("duplicate surface with additive scalar",
+   page(surfaces.render) and "Top_Reservoir_shifted" in p.surfaces
+   and np.allclose(p.surfaces["Top_Reservoir_shifted"].z, surface_before + 5.0, equal_nan=True)
+   and np.array_equal(p.surfaces["Top_Reservoir"].z, surface_before, equal_nan=True))
+fs.OVERRIDES.update({
+    "lib_dup_name_Top_Reservoir": "Top_Reservoir_scaled",
+    "lib_dup_op": "Multiply by factor",
+    "lib_dup_value_Top_Reservoir_multiply": 1.01,
+})
+fs.PRESS.add("Create duplicate")
+ok("duplicate surface with multiplicative scalar",
+   page(surfaces.render) and "Top_Reservoir_scaled" in p.surfaces
+   and np.allclose(p.surfaces["Top_Reservoir_scaled"].z, surface_before * 1.01, equal_nan=True))
+fs.OVERRIDES["del_sel"] = "Top_Reservoir"
+fs.OVERRIDES["delete_surface_confirm_Top_Reservoir"] = True
+fs.PRESS.add("Delete surface")
+ok("deleting a surface used by a workflow step is blocked",
+   page(surfaces.render) and "Top_Reservoir" in p.surfaces
+   and any(level == "warning" and "used by workflow" in message for level, message in fs.MESSAGES))
+fs.PRESS.discard("Delete surface")
+fs.OVERRIDES["del_sel"] = "Top_Reservoir_shifted"
+fs.OVERRIDES["delete_surface_confirm_Top_Reservoir_shifted"] = True
+fs.PRESS.add("Delete surface")
+ok("confirmed deletion removes an unused surface",
+   page(surfaces.render) and "Top_Reservoir_shifted" not in p.surfaces
+   and "Top_Reservoir_shifted" not in p.raw and "Top_Reservoir_shifted" not in p.filters)
+fs.OVERRIDES.clear()
 asc = io_surfaces.write_esri_ascii(p.surfaces["Top_Reservoir"].resample_to(Geometry(450000, 6700000, 200, 200, 41, 31)))
 fs.OVERRIDES["surf_up"] = [F("my_map.asc", asc),
                            F("pts.xyz", "\n".join(f"{450000 + 100 * i},{6700000 + 100 * j},{2000 - i - j}" for i in range(0, 80, 4) for j in range(0, 60, 4)).encode())]
 fs.PRESS.update(["add_my_map.asc", "grid_pts.xyz"])
+fs.DOWNLOADS.clear()
 ok("import ASCII + grid XYZ", page(surfaces.render) and "my_map" in p.surfaces and "pts" in p.surfaces, errors())
+ok("imported and gridded surfaces have save buttons",
+   {"my_map.gri", "pts.gri"} <= {download[1] for download in fs.DOWNLOADS})
 fs.OVERRIDES.pop("surf_up")
 fs.PRESS.add("Create surface")
 fs.OVERRIDES["syn_name"] = "Syn1"
+fs.DOWNLOADS.clear()
 ok("synthetic surface", page(surfaces.render) and "Syn1" in p.surfaces)
+ok("synthetic surface can be saved immediately", any(download[1] == "Syn1.gri" for download in fs.DOWNLOADS))
+fs.DOWNLOADS.clear()
+ok("synthetic surface save persists across reruns", page(surfaces.render)
+   and any(download[1] == "Syn1.gri" for download in fs.DOWNLOADS))
 fs.OVERRIDES.pop("syn_name")
 
 # digitizer round trip
@@ -112,7 +185,14 @@ fs.COMPONENT_VALUES["geomodel_map_editor"] = dig
 ok("digitizer value stored", page(surfaces.render) and len(p.digitized["contours"]) == 3 and len(p.digitized["faults"]) == 1)
 fs.PRESS.update(["Grid digitized data", "Add fault traces"])
 fs.OVERRIDES["dig_name"] = "Dig_map"
+fs.DOWNLOADS.clear()
 ok("grid digitized contours -> surface", page(surfaces.render) and "Dig_map" in p.surfaces, errors())
+ok("digitized surface can be saved immediately", any(download[1] == "Dig_map.gri" for download in fs.DOWNLOADS))
+fs.OVERRIDES["digitized_save_format"] = "IRAP ASCII"
+fs.DOWNLOADS.clear()
+ok("digitized surface save persists and format can change", page(surfaces.render)
+   and any(download[1] == "Dig_map.irap" for download in fs.DOWNLOADS))
+fs.OVERRIDES.pop("digitized_save_format")
 ok("digitized contour depths produce a varying map", np.ptp(p.surfaces["Dig_map"].z) > 50)
 dig_spec = [payload["spec"] for kind, payload in fs.CALLS if kind == "component:geomodel_plotly_view" and payload.get("key") == S.k("digprev")][-1]
 ok("digitized map preview includes boundary", any(t.get("name") == p.boundary + " (boundary)" for t in dig_spec["data"]))

@@ -98,7 +98,12 @@ def render():
     show = c2.radio("Show", ["Faulted", "Unfaulted"], horizontal=True, key=S.k("flt_show"))
     Zb, Zf = faulted_surface(p, bg, list(p.faults.values()))
     sc = S.scene_from_arrays(p, [(bg + (" (faulted)" if show == "Faulted" else ""), Zf if show == "Faulted" else Zb)],
-                             faults=list(p.faults.values()), wells=True, tops=True, clip=False)
+                             faults=list(p.faults.values()), wells=True, tops=True, clip=False,
+                             fault_cuts=list(p.faults.values()) if show == "Faulted" else (),
+                             fault_references={bg + " (faulted)": Zb})
+    st.caption("Faulted preview: the horizon mesh is split across active faults, revealing the depth offset. "
+               "The visible gap is mesh-resolution dependent, not an added geological displacement. "
+               "Run the structural workflow and rebuild the grid after changing fault parameters.")
     viewer3d(sc, key=S.k("flt3d"), height=580, ve=ve)
     note("The preview offsets the backdrop by each fault's displacement field: half of the throw up on the footwall and half down "
          "on the hanging wall, decaying with the drag-zone width. The final horizons are produced in the <b>Structural model</b> step.")

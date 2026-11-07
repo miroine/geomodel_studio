@@ -44,6 +44,7 @@ def grid_line_section(grid, values: np.ndarray, axis: str, index: int, owc=None,
     coord = grid.xs if axis == "j" else grid.ys
     out = dict(x=x[keep], z=z[keep], v=v[keep], k=k[keep], layer_zone=grid.layer_zone[k[keep]], coord_label="Easting" if axis == "j" else "Northing",
                zmin=float(np.nanmin(z[act])) if act.any() else 0.0, zmax=float(np.nanmax(z[act])) if act.any() else 1.0, faults=[], contacts={})
+    out["cell_ids"] = ((k * grid.nj + j_i[0]) * grid.ni + j_i[1])[keep]
     for name, cm in (("OWC", owc), ("GOC", goc)):
         if cm is None:
             continue
@@ -62,30 +63,39 @@ def _to_local(grid, X, Y):
 
 
 def fence_columns(grid, pts, spacing: Optional[float] = None) -> dict:
-    """Map a polyline onto grid columns -> list of segments (dist0, dist1, i, j), merged where consecutive samples share a column."""
+    """Intersect an open polyline with local grid-column boundaries; spacing is retained for compatibility."""
     pts = np.asarray(pts, float)
-    if len(pts) < 2:
-        raise SectionError("A fence needs at least two points.")
+    if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 2 or not np.isfinite(pts).all():
+        raise SectionError("A fence needs at least two finite XY points.")
     L = fz.polyline_length(pts)
-    dx = np.diff(grid.xs).min()
-    dy = np.diff(grid.ys).min()
-    spacing = spacing or max(min(dx, dy) / 4.0, L / 4000.0)
-    x, y, d, _ = fz.sample_polyline(pts, spacing, 6000)
-    u, v = _to_local(grid, x, y)
-    i = np.searchsorted(grid.xs, u, side="right") - 1
-    j = np.searchsorted(grid.ys, v, side="right") - 1
-    inside = (u >= grid.xs[0]) & (u <= grid.xs[-1]) & (v >= grid.ys[0]) & (v <= grid.ys[-1])
-    i, j = np.clip(i, 0, grid.ni - 1), np.clip(j, 0, grid.nj - 1)
+    if L <= 0:
+        raise SectionError("The fence has zero length.")
+    u, v = _to_local(grid, pts[:, 0], pts[:, 1])
     segs = []
-    h = np.diff(d, prepend=d[0] - spacing)  # sample width
-    for n in range(len(d)):
-        if not inside[n]:
+    offset = 0.
+    for n, length in enumerate(np.linalg.norm(np.diff(pts, axis=0), axis=1)):
+        if length == 0:
             continue
-        a, b = d[n] - 0.5 * h[n] if n else d[n], d[n] + 0.5 * h[n] if n < len(d) - 1 else d[n]
-        if segs and segs[-1][2] == i[n] and segs[-1][3] == j[n] and abs(segs[-1][1] - a) < 1.5 * spacing:
-            segs[-1][1] = b
-        else:
-            segs.append([a, b, int(i[n]), int(j[n])])
+        du, dv = u[n + 1] - u[n], v[n + 1] - v[n]
+        cuts = [np.array([0., 1.])]
+        if du != 0:
+            cuts.append((grid.xs - u[n]) / du)
+        if dv != 0:
+            cuts.append((grid.ys - v[n]) / dv)
+        t = np.unique(np.clip(np.concatenate(cuts), 0., 1.))
+        for a, b in zip(t[:-1], t[1:]):
+            if b - a < 1e-12:
+                continue
+            mid = (a + b) / 2
+            um, vm = u[n] + mid * du, v[n] + mid * dv
+            if not (grid.xs[0] <= um <= grid.xs[-1] and grid.ys[0] <= vm <= grid.ys[-1]):
+                continue
+            i = min(np.searchsorted(grid.xs, um, side="right") - 1, grid.ni - 1)
+            j = min(np.searchsorted(grid.ys, vm, side="right") - 1, grid.nj - 1)
+            segs.append([offset + a * length, offset + b * length, int(i), int(j)])
+        offset += length
+        if len(segs) > 20000:
+            raise SectionError("Fence crosses too many grid columns; simplify the path.")
     if not segs:
         raise SectionError("The fence is outside the grid.")
     return dict(segs=np.array(segs, float), length=L)
@@ -109,11 +119,29 @@ def fence_property_section(grid, values: np.ndarray, pts, faults=None, owc=None,
     kk = np.broadcast_to(K, zt.shape).ravel()[keep]
     out = dict(x=x, z=z, v=v.ravel()[keep], k=kk, layer_zone=grid.layer_zone[kk], coord_label="Distance along fence", length=fc["length"],
                zmin=float(np.nanmin(z)) if len(z) else 0.0, zmax=float(np.nanmax(z)) if len(z) else 1.0, contacts={}, faults=[])
+    ii = np.broadcast_to(si[None], zt.shape).ravel()[keep]
+    jj = np.broadcast_to(sj[None], zt.shape).ravel()[keep]
+    out["cell_ids"] = (kk * grid.nj + jj) * grid.ni + ii
+    out["i"], out["j"] = ii, jj
+    path = np.asarray(pts, float)
+    distance = np.concatenate(([0.], np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))))
+    out["world_x"] = np.interp(x, distance, path[:, 0])
+    out["world_y"] = np.interp(x, distance, path[:, 1])
     if faults:
         out["faults"] = fz.fault_crossings(np.asarray(pts, float), list(faults.values()) if isinstance(faults, dict) else list(faults))
     for name, cm in (("OWC", owc), ("GOC", goc)):
-        if cm is not None and np.isfinite(cm[sj, si]).any():
-            out["contacts"][name] = dict(x0=d0, x1=d1, z=np.asarray(cm[sj, si], float))
+        if cm is None:
+            continue
+        cm = np.asarray(cm, float)
+        if cm.shape == grid.actnum.shape:
+            depth = cm[kk, jj, ii]
+            show = np.isfinite(depth) & (depth >= z.min(axis=1)) & (depth <= z.max(axis=1))
+            out["contacts"][name] = dict(x0=x[show, 0], x1=x[show, 1], z=depth[show])
+        elif cm.shape == (grid.nj, grid.ni):
+            if np.isfinite(cm[sj, si]).any():
+                out["contacts"][name] = dict(x0=d0, x1=d1, z=cm[sj, si])
+        else:
+            raise SectionError("Contact overlay must match the grid map or cube shape.")
     return out
 
 
