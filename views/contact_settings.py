@@ -4,6 +4,22 @@ import pandas as pd
 import streamlit as st
 
 from core import units as un
+from core.volumetrics import FLUID_SYSTEMS
+
+
+def fluid_system(contacts, key):
+    current = contacts.get("fluid_system", "auto")
+    if current not in FLUID_SYSTEMS:
+        raise ValueError("Unknown fluid system.")
+    contacts["fluid_system"] = st.selectbox("Fluid system", list(FLUID_SYSTEMS),
+        index=list(FLUID_SYSTEMS).index(current), format_func=FLUID_SYSTEMS.get,
+        key=key("fluid_system", current))
+    system = contacts["fluid_system"]
+    st.caption("Gas only: the water contact is GWC; no oil volume. Undersaturated oil: no free gas. "
+               "Oil with gas cap: water contact plus GOC. FWL offset is below the water contact. "
+               "Single-fluid systems ignore all GOC overrides and GOC properties. "
+               "In gas-only mode, OWC columns in override tables represent GWC.")
+    return system
 
 
 def _optional(value):
@@ -36,13 +52,15 @@ def _overrides(saved, id_field, key, identifiers=()):
 
 
 def render(contacts, project, key):
-    st.markdown("**WOC / OWC and GOC contacts**")
+    system = fluid_system(contacts, lambda field, current: key(field + "_" + current))
+    st.markdown("**Gas-water contact**" if system == "gas" else "**WOC / OWC and GOC contacts**")
     a, b = st.columns(2)
-    contacts["owc"] = float(a.number_input(f"OWC / WOC depth ({un.z()}, positive down)",
+    water_label = "GWC" if system == "gas" else "OWC / WOC"
+    contacts["owc"] = float(a.number_input(f"{water_label} depth ({un.z()}, positive down)",
                                           value=float(contacts["owc"]), key=key("owc")))
-    contacts["fwl_below"] = float(b.number_input(f"FWL below OWC ({un.z()})", min_value=0.,
+    contacts["fwl_below"] = float(b.number_input(f"FWL below {'GWC' if system == 'gas' else 'OWC'} ({un.z()})", min_value=0.,
                                                 value=float(contacts.get("fwl_below", 0)), key=key("fwl")))
-    enabled = st.checkbox("Gas cap (GOC)", value=contacts.get("goc") is not None, key=key("gas"))
+    enabled = system == "oil_gas" or (system == "auto" and st.checkbox("Gas cap (GOC)", value=contacts.get("goc") is not None, key=key("gas")))
     if enabled:
         contacts["goc"] = float(st.number_input(f"GOC depth ({un.z()}, positive down)",
                                                value=float(contacts.get("goc") if contacts.get("goc") is not None else contacts["owc"] - 30),
@@ -50,6 +68,10 @@ def render(contacts, project, key):
     else:
         contacts["goc"] = None
     for field, label in (("owc", "OWC / WOC"), ("goc", "GOC")):
+        if field == "goc" and system in ("gas", "oil"):
+            continue
+        if field == "owc" and system == "gas":
+            label = "GWC"
         source = st.selectbox(f"{label} source", ["Configured contacts", "3D property"],
                               index=1 if contacts.get(field + "_prop") else 0, key=key(field + "_source"))
         contacts[field + "_prop"] = (st.text_input(f"{label} contact-depth property",

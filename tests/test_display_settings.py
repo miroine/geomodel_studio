@@ -152,6 +152,52 @@ st.write(S.proj().display_settings)
         p.delete_surface("Renamed")
         self.assertFalse(p.display_settings["surfaces"])
 
+    def test_custom_min_max_ranges_apply_to_all_views(self):
+        p = fixture()
+        p.display_settings = {"properties": {"PORO": {"vmin": .1, "vmax": .3}, "PERMX": {"vmin": 10., "vmax": 1000.}},
+                              "surfaces": {"Top": {"vmin": 50., "vmax": 250.}}}
+        scale, legend = grid_property(p.grid, "PORO", p.properties, p.display_settings["properties"])
+        self.assertEqual((scale["vmin"], scale["vmax"]), (.1, .3))
+        self.assertEqual((legend["vmin"], legend["vmax"]), ("0.1", "0.3"))
+        perm, _ = grid_property(p.grid, "PERMX", p.properties, p.display_settings["properties"])
+        np.testing.assert_allclose((perm["vmin"], perm["vmax"]), (1., 3.))
+        mp = display.property_map(p, p.grid, "PORO", p.properties["PORO"].values[0], "Map")["data"][0]
+        self.assertEqual((mp["zmin"], mp["zmax"]), (.1, .3))
+        obj = S.build_scene(p, faults=False, polygons=False, wells=False, tops=False).objects[0]
+        self.assertEqual((obj["legend"]["vmin"], obj["legend"]["vmax"]), ("50", "250"))
+        tr = specs.map_2d(p.surfaces["Top"].z, p.lattice, zrange=(50., 250.))["data"][0]
+        self.assertEqual((tr["zmin"], tr["zmax"], tr["zauto"]), (50., 250., False))
+        with self.assertRaisesRegex(ValueError, "smaller"):
+            grid_property(p.grid, "PORO", p.properties, {"PORO": {"vmin": .3, "vmax": .1}})
+        from core import units as un
+        un.convert_project(p, "m", "ft")
+        self.assertAlmostEqual(p.display_settings["surfaces"]["Top"]["vmax"], 250. / .3048)
+        self.assertEqual(p.display_settings["properties"]["PORO"]["vmax"], .3)
+
+    def test_range_editor_saves_validates_and_resets(self):
+        app = AppTest.from_string("""
+import streamlit as st
+from test_display_settings import fixture
+from ui import display
+if "p" not in st.session_state:
+    st.session_state["p"] = fixture()
+display.colors(st.session_state["p"], "Top", "rt", surface=True)
+""").run()
+        self.assertFalse(app.exception)
+        app.checkbox[0].check()
+        app.number_input[0].set_value(300.)
+        app.number_input[1].set_value(200.)
+        next(b for b in app.button if b.label == "Save colours").click().run()
+        self.assertTrue(any("smaller" in e.value for e in app.error))
+        self.assertNotIn("Top", app.session_state["p"].display_settings.get("surfaces", {}))
+        app.number_input[0].set_value(120.)
+        app.number_input[1].set_value(160.)
+        next(b for b in app.button if b.label == "Save colours").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state["p"].display_settings["surfaces"]["Top"], {"vmin": 120., "vmax": 160.})
+        next(b for b in app.button if b.label == "Reset to automatic colours").click().run()
+        self.assertNotIn("Top", app.session_state["p"].display_settings["surfaces"])
+
 
 if __name__ == "__main__":
     unittest.main()

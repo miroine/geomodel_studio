@@ -65,6 +65,7 @@ def _task_card(step, number):
         f'<div class="workflow-number">{number:02d}</div><div class="workflow-content">'
         f'<div class="workflow-category">{escape(group)}</div>'
         f'<div class="workflow-title">{escape(TYPE_LABEL[step["type"]])}</div>'
+        + ("" if step.get("enabled", True) else '<div class="workflow-io"><b>INACTIVE — skipped on run</b></div>') +
         f'<div class="workflow-io"><b>IN</b> {escape(source)}</div>'
         f'<div class="workflow-io"><b>OUT</b> {escape(output)}</div></div></div>',
         unsafe_allow_html=True,
@@ -94,6 +95,8 @@ def _extension(out, d, kk):
 def _defined_horizons(p, exclude_id=None):
     out = []
     for s in p.steps:
+        if not s.get("enabled", True):
+            continue
         if s["type"] in ("surface", "isochore", "proportional", "zone") and s.get("_id") != exclude_id and s["horizon"] not in out:
             out.append(s["horizon"])
         elif s["type"] == "layers" and s.get("_id") != exclude_id:
@@ -114,7 +117,7 @@ def _layer_names(p, s):
 def _layer_horizon_set(p):
     out = set()
     for s in p.steps:
-        if s["type"] == "layers":
+        if s.get("enabled", True) and s["type"] == "layers":
             out.update(_layer_names(p, s))
     return out
 
@@ -300,6 +303,12 @@ def _steps_ui(p):
         if i:
             st.markdown('<div class="workflow-connector" aria-label="Next task">&#8595;</div>', unsafe_allow_html=True)
         with st.container(border=True):
+            enabled = st.checkbox("Active", value=bool(s.get("enabled", True)), key=S.k(f"enabled_{uid}"),
+                                  help="Inactive tasks stay configured but are skipped when the workflow runs.")
+            if enabled != s.get("enabled", True):
+                s["enabled"] = enabled
+                p.invalidate()
+                st.rerun()
             _task_card(s, i + 1)
             st.markdown(describe(s))
             c1, c2, c3 = st.columns(3)
@@ -339,6 +348,7 @@ def _add_step_ui(p):
         new = step_form(kind, {}, "new_" + kind, p)
         if st.button("Add step", type="primary", key=S.k("add_step")):
             new["_id"] = S.new_id()
+            new["enabled"] = True
             if kind == "faults":
                 p.steps = [x for x in p.steps if x["type"] != "faults"]
                 p.steps.insert(0, new)
@@ -563,7 +573,8 @@ def render():
         with st.container(border=True):
             st.subheader("Build & validate")
             note("Tasks execute in list order. <b>Apply faults</b> selects faults for the whole framework, including calibration; "
-                 "it is not a local operation on just the next horizon. Define input horizons before tasks that use them.")
+                 "it is not a local operation on just the next horizon. Inactive tasks are skipped, including their outputs. "
+                 "Keep input-horizon tasks active for any downstream tasks that use them.")
             if st.button("Run workflow", type="primary", disabled=not p.steps, use_container_width=True):
                 try:
                     with st.spinner("Building the structural framework..."):

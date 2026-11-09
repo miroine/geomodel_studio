@@ -19,6 +19,7 @@ from scipy.special import ndtri
 from scipy.optimize import least_squares
 
 from . import geostat as gs
+from . import facies_trends
 
 METHODS = ["truncated_gaussian", "plurigaussian", "indicator", "objects"]
 COLORS = ["#8C8C8C", "#C5A100", "#00A9F4", "#1B998B", "#F46036", "#6A4C93", "#D7263D", "#2251FF"]
@@ -178,7 +179,7 @@ def _scores(f, w, cfg):
     return wrank_uniform(f, w) if cfg.get("vol_weight", True) else gs.rank_uniform(f)
 
 
-def simulate_tgs(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=None) -> np.ndarray:
+def simulate_tgs(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=None, offsets=None) -> np.ndarray:
     """Truncated Gaussian facies realisation (nk, nj, ni) of facies codes (0 = not simulated)."""
     codes = np.array([f["code"] for f in cfg["facies"]])
     nf = len(codes)
@@ -197,9 +198,11 @@ def simulate_tgs(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=No
         vp = dict(vtype=z["vtype"], major=z["major"], minor=z["minor"], vert=z["vert"], nugget=z.get("nugget", 0.0))
         rel = gs.rel_angle(z["azimuth"], grid.angle)
         f = gs.gaussian_field((ks.size, grid.nj, grid.ni), (dx, dy, dz), vp, rng, rel)
-        cum = np.cumsum(_props(z, fr, bool(cfg["trend"])), axis=0)                  # (nf, nk_z)
+        base = _props(z, fr, bool(cfg["trend"]))[:, :, None, None]
+        probs = facies_trends.probabilities(base, offsets[:, ks]) if offsets is not None else base
+        cum = np.cumsum(probs, axis=0)
         cum = np.clip(cum / cum[-1:], 0.0, 1.0)
-        lo = np.vstack([np.zeros((1, ks.size)), cum[:-1]])                           # probability interval of each facies
+        lo = np.concatenate([np.zeros_like(cum[:1]), cum[:-1]], axis=0)
         kk = jj = ii = fc = None
         if cond is not None:
             sub = cond[ks]
@@ -208,12 +211,15 @@ def simulate_tgs(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=No
                 idx = np.array([int(np.argmin(np.abs(codes - c))) if c in codes else -1 for c in np.rint(sub[kk, jj, ii])])
                 good = idx >= 0
                 kk, jj, ii, idx = kk[good], jj[good], ii[good], idx[good]
-                mid = np.clip(0.5 * (lo[idx, kk] + cum[idx, kk]), 1e-4, 1 - 1e-4)
+                if offsets is not None:
+                    mid = np.clip(0.5 * (lo[idx, kk, jj, ii] + cum[idx, kk, jj, ii]), 1e-4, 1 - 1e-4)
+                else:
+                    mid = np.clip(0.5 * (lo[idx, kk, 0, 0] + cum[idx, kk, 0, 0]), 1e-4, 1 - 1e-4)
                 if kk.size:
                     f = gs.condition_field(f, kk, jj, ii, ndtri(mid), uc, vc, dz, vp, rel)
                 fc = idx
         u = _scores(f, vol[ks], cfg)
-        fi = (u[None] >= cum[:-1, :, None, None]).sum(axis=0)                        # facies index per cell
+        fi = (u[None] >= cum[:-1]).sum(axis=0)
         if fc is not None and kk is not None and kk.size:
             fi[kk, jj, ii] = fc
         out[ks] = codes[fi]
@@ -395,7 +401,7 @@ def _sk_weights(dpos: np.ndarray, tpos: np.ndarray, vp: dict, nmax: int):
     return iic, np.where(valid, w, 0.0), valid
 
 
-def simulate_sis(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=None) -> np.ndarray:
+def simulate_sis(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=None, offsets=None) -> np.ndarray:
     """Sequential indicator simulation of the facies (active cells), one variogram per zone shared by all indicators.
 
     Random path; each visited cell gets the local probabilities p_c = p0_c + sum w_i (I_c(x_i) - p0_c(x_i)) from simple indicator kriging of
@@ -424,7 +430,7 @@ def simulate_sis(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=No
             continue
         pos = gs._scaled(uc[ii], vc[jj], kk * dz, vp, rel)
         p0 = _props(z, fr, bool(cfg["trend"]))[:, kk]                                  # (nf, N) prior proportions per cell
-        p0 = p0 / p0.sum(axis=0, keepdims=True)
+        p0 = facies_trends.probabilities(p0, offsets[:, ks][:, kk, jj, ii]) if offsets is not None else p0 / p0.sum(axis=0, keepdims=True)
         state = -np.ones(N, int)
         if cond is not None:
             d = cond[ks][kk, jj, ii]
@@ -461,17 +467,31 @@ def simulate_sis(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=No
     return out
 
 
-def simulate(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=None) -> np.ndarray:
+def simulate(grid, cfg: dict, cond: Optional[np.ndarray] = None, progress=None, surfaces=None) -> np.ndarray:
     errs = check_config(cfg, grid)
     if errs:
         raise FaciesError(" ".join(errs))
+    trends = cfg.get("probability_trends", {})
+    enabled = any(t.get(k) for t in trends.values() for k in ("depth_enabled", "map_enabled", "distance_enabled"))
+    if enabled and cfg["method"] not in ("truncated_gaussian", "indicator"):
+        raise FaciesError("Facies probability trends are supported only by truncated Gaussian and indicator simulation.")
+    try:
+        offsets = facies_trends.offsets(grid, cfg, surfaces) if enabled else None
+    except (ValueError, TypeError, KeyError) as exc:
+        raise FaciesError(str(exc)) from exc
     if cfg["method"] == "objects":
         return simulate_objects(grid, cfg, progress)
     if cfg["method"] == "plurigaussian":
         return simulate_plurigaussian(grid, cfg, progress)
     if cfg["method"] == "indicator":
-        return simulate_sis(grid, cfg, cond, progress)
-    return simulate_tgs(grid, cfg, cond, progress)
+        try:
+            return simulate_sis(grid, cfg, cond, progress, offsets)
+        except ValueError as exc:
+            raise FaciesError(str(exc)) from exc
+    try:
+        return simulate_tgs(grid, cfg, cond, progress, offsets)
+    except ValueError as exc:
+        raise FaciesError(str(exc)) from exc
 
 
 def legend(cfg: dict) -> dict:

@@ -7,15 +7,68 @@ import uuid
 
 import numpy as np
 
-from . import facies as fa, geostat as gs, petrophysics as petro, props as pp, volumetrics as vol
+from . import facies as fa, geostat as gs, petrophysics as petro, props as pp, volumetrics as vol, polygon_property, property_history
 
 JOB_TYPES = {
     "facies": "Facies model",
     "calculator": "Python calculator",
-    "petrophysics": "Petrophysics - domain parameters",
+    "polygon": "Polygon property assignment",
+    "petrophysics": "Petrophysics - domain assignments",
     "stochastic": "Petrophysics - stochastic",
     "saturation": "Water saturation",
+    "tool": "Property tool",
 }
+
+HISTORY_TYPES = {
+    "Facies model": "facies", "Python calculator": "calculator",
+    "Polygon property assignment": "polygon", "Domain assignments": "petrophysics",
+    "Stochastic property modelling": "stochastic", "Water saturation": "saturation",
+}
+TOOL_RUNS = ("Zone table properties", "Generate geometric properties", "Constant property",
+             "Plane properties", "Contact properties", "Fault-block region and segments",
+             "Block well logs", "Simple kriging", "Petrophysics from facies", "Recompute stale properties")
+
+
+def job_from_history(name, settings, outputs, existing=()):
+    """Convert recorded settings into an independent executable step."""
+    kind = HISTORY_TYPES.get(name, "tool" if name in TOOL_RUNS else None)
+    if kind is None:
+        return None
+    cfg = deepcopy(settings)
+    if kind == "calculator":
+        cfg["result_kind"] = cfg.pop("kind", cfg.get("result_kind", "continuous"))
+    if kind == "petrophysics":
+        cfg["outputs"] = list(outputs)
+    if kind == "tool":
+        if name == "Recompute stale properties":
+            cfg["outputs"] = list(outputs)
+        cfg = dict(operation=name, settings=cfg)
+    names = {j["name"] for j in existing}
+    label, suffix = name, 2
+    while label in names:
+        label = f"{name} {suffix}"
+        suffix += 1
+    return dict(id=uuid.uuid4().hex[:12], type=kind, name=label, enabled=True, config=cfg)
+
+
+def restore_history(project):
+    """Append completed, unlinked historical runs once, in execution order."""
+    added = 0
+    for entry in project.property_history:
+        if entry["status"] != "Completed" or entry.get("job_id"):
+            continue
+        if entry.get("crs") and any(entry["crs"].get(k) != project.crs.get(k)
+                                    for k in ("epsg", "xy_unit", "z_unit")):
+            raise PropertyWorkflowError("Historical CRS/units differ from the project. Restore in the original CRS/units first.")
+        if job_from_history(entry["name"], entry["settings"], entry["outputs"]) is None:
+            raise PropertyWorkflowError(f"History entry '{entry['name']}' has no executable configuration.")
+    for entry in project.property_history:
+        if entry["status"] == "Completed" and not entry.get("job_id"):
+            job = job_from_history(entry["name"], entry["settings"], entry["outputs"], project.property_jobs)
+            project.property_jobs.append(job)
+            entry["job_id"] = job["id"]
+            added += 1
+    return added
 
 
 class PropertyWorkflowError(ValueError):
@@ -34,6 +87,9 @@ def new_job(kind, project):
         cfg["output"] = "FACIES"
     elif kind == "calculator":
         cfg = dict(code="FACIES_COPY = FACIES", output="RESULT", result_kind="discrete", unit="")
+    elif kind == "polygon":
+        cfg = dict(output="PORO", polygon=next(iter(project.polygons), ""), mode="both",
+                   inside=0.2, outside=0.1, kind="continuous", unit="")
     elif kind == "stochastic":
         cfg = deepcopy(project.stochastic or gs.default_config(grid))
     elif kind == "petrophysics":
@@ -47,6 +103,8 @@ def new_job(kind, project):
         cfg = deepcopy(candidates[-1]) if candidates else dict(method="satheight", domain="zone", facies="", output="SW",
             rows=[dict(zone=i + 1, label=z.name, swirr=0.2, entry=2.0, lam=0.5) for i, z in enumerate(grid.zones)])
         cfg["contacts"] = deepcopy(project.volumetrics or vol.default_config(grid))
+    elif kind == "tool":
+        cfg = dict(operation="Constant property", settings=dict(name="CONSTANT", value=0.2, kind="continuous", unit=""))
     names = {j["name"] for j in project.property_jobs}
     name, suffix = JOB_TYPES[kind], 2
     while name in names:
@@ -95,9 +153,89 @@ def _blocked(grid, properties, name):
     return prop.values
 
 
-def _execute(job, grid, properties, progress):
+def _tool(cfg, grid, properties, project, progress):
+    from copy import copy
+    from . import regions, logs, units
+    operation, settings = cfg["operation"], cfg["settings"]
+    if operation == "Constant property":
+        name = _name(settings["name"])
+        return {name: pp.make_property(grid, name, settings["value"], settings["kind"], settings["unit"], "manual")}
+    if operation == "Generate geometric properties":
+        return pp.geometry_properties(grid, settings["properties"])
+    if operation == "Zone table properties":
+        from .cpgrid import ZoneSpec
+        snapshot = copy(grid)
+        snapshot.zones = [ZoneSpec.from_dict(row) for row in settings["zones"]]
+        if [z.name for z in snapshot.zones] != [z.name for z in grid.zones]:
+            raise PropertyWorkflowError("Saved zone table does not match the current grid zones.")
+        return pp.zone_defaults(snapshot)
+    if operation == "Plane properties":
+        return regions.plane_properties(grid, settings["planes"], settings["depth_unit"])
+    if operation == "Contact properties":
+        return regions.contact_properties(grid, settings["volumetrics"], units.z(), properties)
+    if operation == "Fault-block region and segments":
+        fluid = None
+        if settings["mode"].endswith("fluid"):
+            fluid = petro.property_values(grid, properties, "FLUID") if "FLUID" in properties else vol.fluid_array(
+                grid, settings["volumetrics"], props=properties)
+        return regions.region_segment(grid, settings["mode"], fluid)
+    if operation == "Block well logs":
+        if project is None:
+            raise PropertyWorkflowError("Well/log inputs are unavailable.")
+        names = settings.get("wells")
+        if names and any(n not in project.wells or n not in project.logs for n in names):
+            raise PropertyWorkflowError("A saved blocking well or its logs are missing.")
+        values, info = logs.block_wells(grid, project.wells, project.logs, settings["curve"],
+                                       settings["discrete"], settings["average"], names)
+        if not info["cells"]:
+            raise PropertyWorkflowError("No log sample falls in an active cell.")
+        name = _name(settings["output"])
+        unit = project.logs[info["wells"][0]]["units"].get(settings["curve"], "")
+        return {name: pp.make_property(grid, name, values, "discrete" if settings["discrete"] else "continuous",
+                                      unit, "blocked wells", f"{settings['curve']} blocked ({settings['average']})")}
+    if operation == "Simple kriging":
+        values = _blocked(grid, properties, settings["input"])
+        estimates = gs.krige_property(grid, values, settings["variogram"],
+                                      gs.rel_angle(settings["azimuth"], grid.angle), True,
+                                      settings["neighbours"], settings["normal_score"], progress=progress)
+        name = _name(settings["output"])
+        return {name: pp.make_property(grid, name, estimates, unit=properties[settings["input"]].unit, source="kriging")}
+    if operation == "Petrophysics from facies":
+        values = petro.property_values(grid, properties, settings["input_facies"])
+        result = fa.petrophysics(grid, values, settings)
+        return {n: pp.make_property(grid, n, r["values"], r["kind"], r["unit"], "facies",
+                                    f"from facies {settings['input_facies']}") for n, r in result.items()}
+    if operation == "Recompute stale properties":
+        result = {}
+        for name in settings.get("outputs", settings["requested"]):
+            if name not in properties:
+                raise PropertyWorkflowError(f"Refresh input '{name}' is missing.")
+            prop = deepcopy(properties[name])
+            if prop.source == "geometry":
+                result.update(pp.geometry_properties(grid, [name]))
+            elif prop.source == "zones":
+                result[name] = pp.zone_defaults(grid)[name]
+            elif prop.source == "calculator":
+                values = pp.run_calculator(prop.expr, grid, properties | result, name)
+                result.update({n: pp.make_property(grid, n, v, prop.kind, prop.unit, "calculator", prop.expr)
+                               for n, v in values.items()})
+            elif prop.source in ("manual", "import"):
+                prop.stale, prop.geom_hash = False, pp.grid_hash(grid)
+                result[name] = prop
+            else:
+                raise PropertyWorkflowError(f"Rerun the original modelling step for '{name}'.")
+        return result
+    raise PropertyWorkflowError(f"Unknown property tool: {operation}")
+
+
+def _execute(job, grid, properties, progress, surfaces=None, polygons=None, project=None):
     kind = job["type"]
     cfg = deepcopy(job["config"])
+    if kind == "tool":
+        return _tool(cfg, grid, properties, project, progress)
+    if kind == "polygon":
+        result = polygon_property.assign(grid, properties, (polygons or {}).get(cfg.get("polygon")), cfg)
+        return {result.name: result}
     if kind == "facies":
         output = _name(cfg.get("output", "FACIES"))
         codes = np.asarray([f["code"] for f in cfg["facies"]], float)
@@ -111,7 +249,7 @@ def _execute(job, grid, properties, progress):
         if errs:
             raise PropertyWorkflowError(" ".join(errs))
         data = _blocked(grid, properties, cfg["cond"]) if cfg.get("cond") else None
-        values = fa.simulate(grid, cfg, cond=data, progress=progress)
+        values = fa.simulate(grid, cfg, cond=data, progress=progress, surfaces=surfaces)
         values = np.where(grid.actnum > 0, values, np.nan)
         return {output: pp.make_property(grid, output, values, "discrete", source="facies",
                                         expr=f"workflow facies ({cfg['method']})", legend=fa.legend(cfg))}
@@ -131,15 +269,18 @@ def _execute(job, grid, properties, progress):
             _name(name)
             previous = properties.get(name)
             kind_ = cfg.get("result_kind", "continuous")
+            metadata = cfg.get("output_metadata", {}).get(name, {})
+            kind_ = metadata.get("kind", kind_)
             active_values = value[grid.actnum > 0]
             if kind_ == "discrete" and not np.equal(active_values, np.rint(active_values)).all():
                 raise PropertyWorkflowError(f"Discrete output '{name}' contains non-integer codes.")
-            result[name] = pp.make_property(grid, name, value, kind_, cfg.get("unit", ""), "calculator", code,
+            result[name] = pp.make_property(grid, name, value, kind_, metadata.get("unit", cfg.get("unit", "")), "calculator", code,
                                            legend=previous.legend if previous and kind_ == "discrete" else None)
         return result
     if kind == "petrophysics":
         cfg["rows"] = _active_rows(grid, properties, cfg, cfg["rows"])
-        result = petro.model_petrophysics(grid, properties, cfg["domain"], cfg.get("facies", ""), cfg["rows"])
+        result = petro.model_petrophysics(grid, properties, cfg["domain"], cfg.get("facies", ""), cfg["rows"],
+                                         cfg.get("trends"), surfaces)
         outputs = cfg.get("outputs", pp.ZONE_PROPS)
         if not outputs or set(outputs) - set(result):
             raise PropertyWorkflowError("Select valid petrophysical outputs.")
@@ -149,7 +290,7 @@ def _execute(job, grid, properties, progress):
             for pc in cfg["props"].values():
                 pc["facies_rows"] = _active_rows(grid, properties, cfg, pc.get("facies_rows", []), stochastic=True)
         data = {n: _blocked(grid, properties, name) for n, name in cfg.get("cond", {}).items()}
-        result = gs.simulate(grid, cfg, progress=progress, cond=data or None, properties=properties)
+        result = gs.simulate(grid, cfg, progress=progress, cond=data or None, properties=properties, surfaces=surfaces)
         return {n: pp.make_property(grid, n, r["values"], r["kind"], r["unit"], "stochastic",
                                    f"workflow stochastic by {cfg.get('domain', 'zone')}") for n, r in result.items()}
     if kind == "saturation":
@@ -178,6 +319,7 @@ def run(project, progress=None, job_id=None):
         raise PropertyWorkflowError("Activate at least one job.")
     properties = dict(project.properties)
     reports = []
+    pending = []
     for index, job in enumerate(selected):
         if job_id is None and not job.get("enabled", True):
             reports.append(dict(job=job["name"], status="Skipped", outputs=[]))
@@ -186,19 +328,29 @@ def run(project, progress=None, job_id=None):
             def update(fraction, index=index):
                 if progress:
                     progress((index + fraction) / len(selected))
-            result = _execute(job, grid, properties, update)
+            result = _execute(job, grid, properties, update, project.surfaces, project.polygons, project)
             for name, prop in result.items():
                 values = prop.values[grid.actnum > 0]
-                if not np.isfinite(values).all():
+                sparse = prop.source == "blocked wells" or (
+                    job["type"] == "tool" and job["config"]["operation"] == "Contact properties")
+                if np.isinf(values).any() or (not sparse and not np.isfinite(values).all()):
                     raise PropertyWorkflowError(f"Output '{name}' has non-finite values in active cells.")
-                if prop.kind == "discrete" and not np.equal(values, np.rint(values)).all():
+                finite = values[np.isfinite(values)]
+                if prop.kind == "discrete" and not np.equal(finite, np.rint(finite)).all():
                     raise PropertyWorkflowError(f"Discrete output '{name}' contains non-integer codes.")
             properties.update(result)
+            pending.append((job, list(result)))
             reports.append(dict(job=job["name"], status="Completed", outputs=list(result)))
             update(1.0)
         except (pp.CalcError, gs.GeostatError, fa.FaciesError, petro.PetroError, PropertyWorkflowError,
                 KeyError, TypeError, ValueError, OverflowError) as exc:
+            for attempted, outputs in pending:
+                property_history.record(project, attempted["name"], attempted["config"], outputs,
+                                        status="Rolled back", message="A later workflow job failed.", job_id=attempted["id"])
+            property_history.record(project, job["name"], job["config"], [], status="Failed", message=str(exc), job_id=job["id"])
             number = project.property_jobs.index(job) + 1
             raise PropertyWorkflowError(f"Job {number} - {job['name']}: {exc}. No workflow outputs were committed.") from exc
     project.properties = properties
+    for job, outputs in pending:
+        property_history.record(project, job["name"], job["config"], outputs, job_id=job["id"])
     return reports

@@ -7,7 +7,7 @@ from core import units as un
 from core import interp, io_surfaces
 from core import project as pj
 from core.faults import Fault, next_color
-from core.surface import Surface, synthetic_surface
+from core.surface import Geometry, Surface, surface_area_values, synthetic_surface
 from ui import state as S
 from ui import specs
 from ui.components import map_editor, plotly_view, viewer3d
@@ -97,9 +97,10 @@ def _library(p):
     with st.container(border=True):
         with_surface = S.pick("Surface to save", names, "lib_save_surface", "surface")
         _save_surface(p, p.surfaces[with_surface], "lib_save")
-        st.download_button("Save complete project (.gmsz)", pj.to_bytes(p),
-                           file_name=f"{p.name.replace(' ', '_')}.gmsz", mime="application/zip",
-                           key=S.k("lib_save_project"))
+        if st.button("Prepare complete project download", key=S.k("lib_prepare_project")):
+            st.download_button("Save complete project (.gmsz)", pj.to_bytes(p),
+                               file_name=f"{p.name.replace(' ', '_')}.gmsz", mime="application/zip",
+                               key=S.k("lib_save_project"))
         st.caption("Save the project to preserve all surfaces, raw maps, filter history and digitized contours.")
     c1, c2, c3 = st.columns([3, 1, 1])
     sel = c1.multiselect("Show", names, default=names[:min(3, len(names))], key=S.k("lib_sel", names))
@@ -193,6 +194,8 @@ def _import(p):
     else:
         st.caption("xtgeo not installed: IRAP files use the built-in reader. `pip install xtgeo` is recommended.")
     fxy, fzz = _file_units("imp", p)
+    st.caption("The first regular-grid surface sets the model area automatically. Surface files do not establish "
+               "the project CRS; set the correct EPSG separately on the Project page.")
     files = st.file_uploader("Surface files", accept_multiple_files=True, key=S.k("surf_up"))
     for f in files or []:
         with st.container(border=True):
@@ -208,11 +211,35 @@ def _import(p):
                 g = s.geom
                 st.caption(f"{g.ncol} x {g.nrow} nodes, dx {g.xinc:g}, dy {g.yinc:g}, rotation {g.rotation:g} deg, "
                            f"z {np.nanmin(s.z):.1f} .. {np.nanmax(s.z):.1f}")
+                replace_area = False
+                if p.has_lattice():
+                    nonce = st.session_state.get(S.k(f"tmp_area_confirm_{f.name}"), 0)
+                    replace_area = st.checkbox("Replace existing model area with this surface on import",
+                                               key=S.k(f"imp_replace_area_{f.name}_{nonce}"),
+                                               help="Rebuilding the structure and grid will be required.")
                 if st.button("Add to library", key=S.k(f"add_{f.name}"), type="primary"):
+                    if replace_area:
+                        st.session_state[S.k(f"tmp_area_confirm_{f.name}")] = nonce + 1
                     s.name = name
                     p.put_surface(s)
                     st.session_state[S.k(f"tmp_import_saved_{f.name}")] = name
                     st.success(f"Added {name}.")
+                    if not p.has_lattice() or replace_area:
+                        try:
+                            area = surface_area_values(g)
+                            lattice = Geometry.from_bounds(*area)
+                        except (ValueError, OverflowError) as exc:
+                            st.error(f"Surface imported, but the model area could not be set: {exc}")
+                        else:
+                            for key, value in zip(("lx0", "lx1", "ly0", "ly1", "ldx", "ldy"), area):
+                                st.session_state[S.k(key)] = float(value)
+                            if lattice.ncol * lattice.nrow > 400_000:
+                                st.warning("Surface imported, but its model area exceeds 400,000 nodes. "
+                                           "On the Project page, increase dx and dy before setting the area.")
+                            else:
+                                p.lattice = lattice
+                                p.invalidate()
+                                st.success("Model area set from the surface. Set or verify the project CRS separately.")
             else:
                 pts = un.scale_points(obj, fxy, fzz)
                 st.caption(f"{len(pts):,} XYZ points; x {pts[:, 0].min():.0f}..{pts[:, 0].max():.0f}, y {pts[:, 1].min():.0f}..{pts[:, 1].max():.0f}, z {pts[:, 2].min():.1f}..{pts[:, 2].max():.1f}")
@@ -340,13 +367,13 @@ def render():
     banner("1 - Surfaces", f"{n} depth map{'s' if n != 1 else ''} in the library - import, digitize or generate the structural inputs"
            if n else "Start the structural framework: import a map, digitize one, or generate a concept surface")
     t1, t5, t2, t3, t4 = st.tabs(["Library & QC", "Filter & clip", "Import files", "Digitize a map (JavaScript)", "Synthetic surface"])
-    with t1:
-        _library(p)
-    with t5:
-        filters_view.render_tab(p)
     with t2:
         _import(p)
     with t3:
         _digitize(p)
     with t4:
         _synthetic(p)
+    with t1:
+        _library(p)
+    with t5:
+        filters_view.render_tab(p)

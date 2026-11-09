@@ -32,6 +32,11 @@ def render():
     p = S.proj()
     banner("5 - Zones & layering", f"{len(p.zones)} zones, {sum(z.nlayers for z in p.zones)} layers (before follow-top / follow-base derived counts)"
            if p.zones else "Group horizons into zones and choose a layering style for each")
+    render_controls(p)
+
+
+def render_controls(p):
+    """Edit shared zone settings; return whether they are valid for grid construction."""
     if p.structure is None:
         note("Run the structural model first (page 4) - zones are defined between its horizons.", warn=True)
         return
@@ -100,3 +105,4 @@ def render():
         st.dataframe(pd.DataFrame(rows), hide_index=True)
         tot = sum(r["Layers"] for r in rows)
         st.caption(f"Total layers: {tot}.  Cells in the grid = layers x columns; keep total below ~3 million for interactive use.")
+    return not errs

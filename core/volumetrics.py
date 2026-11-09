@@ -51,10 +51,17 @@ def default_config(grid) -> dict:
         report_by="ZONE")
 
 
+FLUID_SYSTEMS = {"auto": "From contacts (legacy)", "gas": "Gas only",
+                 "oil": "Undersaturated oil", "oil_gas": "Oil with gas cap"}
+
+
 def check_config(grid, cfg) -> List[str]:
     errs = []
     c = cfg["contacts"]
-    property_contacts = c.get("owc_prop") or c.get("goc_prop")
+    system = c.get("fluid_system", "auto")
+    if system not in FLUID_SYSTEMS:
+        errs.append("Unknown fluid system.")
+    property_contacts = c.get("owc_prop") or c.get("goc_prop") or system in ("gas", "oil")
     if not property_contacts and c["goc"] is not None and c["goc"] > c["owc"]:
         errs.append("GOC must be above (shallower than) the OWC.")
     for b, v in c["blocks"].items():
@@ -157,7 +164,7 @@ def contact_cubes(grid, cfg, props=None, over=None):
             goc = goc + plane[None]
         if c.get("owc_prop"):
             owc = _contact_property(grid, props, c["owc_prop"])
-        if c.get("goc_prop"):
+        if c.get("goc_prop") and c.get("fluid_system", "auto") not in ("gas", "oil"):
             goc = _contact_property(grid, props, c["goc_prop"])
     sh = float(over.get("owc_shift", 0.0))
     owc = owc + sh
@@ -165,7 +172,16 @@ def contact_cubes(grid, cfg, props=None, over=None):
     if over.get("struct_field") is not None:
         owc = owc + over["struct_field"][None]
         goc = goc + over["struct_field"][None]
-    if c.get("owc_prop") or c.get("goc_prop"):
+    system = c.get("fluid_system", "auto")
+    if system not in FLUID_SYSTEMS:
+        raise VolError("Unknown fluid system.")
+    if system == "gas":
+        goc = owc.copy()
+    elif system == "oil":
+        goc[:] = np.nan
+    elif system == "oil_gas" and not np.isfinite(goc[grid.actnum > 0]).all():
+        raise VolError("Oil with gas cap requires a GOC in every active cell.")
+    if c.get("owc_prop") or c.get("goc_prop") or system != "auto":
         active = grid.actnum > 0
         if (np.isinf(goc[active])).any() or not np.isfinite(owc[active]).all():
             raise VolError("Contact depths must be finite; undefined GOC means no gas cap.")
@@ -256,6 +272,10 @@ def compute(grid, cfg, props, vol_to_m3=1.0, over: Optional[dict] = None, ridx: 
         GIIP=tot(giip), STOIIP=tot(stoiip))
     if not cells:
         return out
+    pore = vol * ntg * net * phi * mask
+    oil_pv = cellv["oil"]["HCPV"]
+    gas_pv = cellv["gas"]["HCPV"]
+    water_pv = np.maximum(pore - oil_pv - gas_pv, 0.0)
     rows_z = []
     for zi, z in enumerate(grid.zones):
         m = grid.layer_zone == zi
@@ -275,8 +295,22 @@ def compute(grid, cfg, props, vol_to_m3=1.0, over: Optional[dict] = None, ridx: 
     fluid = fluid_array(grid, cfg, over, props)
     out.update(by_zone=rows_z, by_block=rows_b, owc=owc2, goc=goc2,
                cells=dict(FLUID=fluid, SW=sw, GRV=cellv["oil"]["GRV"] + cellv["gas"]["GRV"], HCPV=cellv["oil"]["HCPV"] + cellv["gas"]["HCPV"],
-                          STOIIP=stoiip, GIIP=giip, NET=net.astype(float), PHI=phi, NTG=ntg))
+                          STOIIP=stoiip, GIIP=giip, NET=net.astype(float), PHI=phi, NTG=ntg,
+                          OIL_PV=oil_pv, GAS_PV=gas_pv, WATER_PV=water_pv))
     return out
+
+
+def ternary_colors(oil, gas, water):
+    """RGB fluid mixture by reservoir pore volume: red gas, green oil, blue water."""
+    oil, gas, water = np.broadcast_arrays(*(np.asarray(v, float) for v in (oil, gas, water)))
+    components = np.stack((gas, oil, water), axis=-1)
+    if not np.isfinite(components).all() or (components < 0).any():
+        raise VolError("Ternary fluid volumes must be finite and non-negative.")
+    total = components.sum(axis=-1)
+    fractions = np.divide(components, total[..., None], out=np.zeros_like(components), where=total[..., None] > 0)
+    colors = np.rint(255 * fractions).astype(np.uint8)
+    colors[total == 0] = (190, 190, 190)
+    return colors
 
 
 def scan_contact(grid, cfg, props, vol_to_m3, owc_values, key="STOIIP") -> np.ndarray:

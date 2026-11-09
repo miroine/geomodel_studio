@@ -40,17 +40,27 @@ class StochasticFaciesTests(unittest.TestCase):
         app = AppTest.from_file(os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")).run(timeout=30)
         self.assertFalse(app.exception)
         stages = [m.value for m in app.markdown if 'class="sidebar-flow-title"' in m.value]
-        self.assertEqual(len(stages), 4)
-        self.assertIn("Horizon & fault framework", stages[0])
-        self.assertIn("Populate the reservoir", stages[-1])
+        self.assertEqual(len(stages), 8)
+        self.assertIn("Project", stages[0])
+        self.assertIn("Structural framework", stages[2])
+        self.assertIn("Export", stages[-1])
         arrows = [m for m in app.markdown if 'class="sidebar-flow-arrow"' in m.value]
-        self.assertEqual(len(arrows), 4)
-        next(b for b in app.button if b.label == "Structural model").click().run(timeout=30)
+        self.assertEqual(len(arrows), 7)
+        self.assertTrue(any('class="statusbar"' in m.value and "Merouane Hamdani" in m.value for m in app.markdown))
+        self.assertTrue(any("non-commercial use only" in m.value for m in app.markdown))
+        app.button(key="proc_Structural framework").click().run(timeout=30)
         self.assertFalse(app.exception)
         self.assertEqual(app.session_state["nav"], "Structural model")
-        next(b for b in app.button if b.label == "Properties").click().run(timeout=30)
+        app.button(key="ribbon_Property modelling").click().run(timeout=30)
         self.assertFalse(app.exception)
         self.assertEqual(app.session_state["nav"], "Properties")
+        app.button(key="ribbon_Analysis & QC").click().run(timeout=30)
+        self.assertEqual(app.session_state["nav"], "3D window")
+        app.button(key="tool_Upscaling").click().run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state["nav"], "Upscaling")
+        self.assertTrue(any("Analysis & QC" in m.value and "Upscaling" in m.value
+                            for m in app.markdown if 'class="breadcrumb"' in m.value))
 
     def test_distinct_histograms_in_each_zone_facies_and_inactive_nan(self):
         grid, props, cfg = fixture()

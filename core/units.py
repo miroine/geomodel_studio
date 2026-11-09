@@ -259,6 +259,14 @@ def _scale_contacts(c, fx, fz):
 
 
 def _scale_facies(cfg, fx, fz):
+    for trend in cfg.get("probability_trends", {}).values():
+        for key in ("curve", "distance_curve"):
+            if key in trend:
+                trend[key] = [[float(x) * fz, y] for x, y in trend[key]]
+        if "reference" in trend:
+            trend["reference"] *= fz
+        if "strength" in trend:
+            trend["strength"] /= fz
     for zone in cfg.get("zones", []):
         for key in ("major", "minor", "major2", "minor2"):
             if key in zone:
@@ -288,6 +296,12 @@ def convert_project(p, new_xy: str, new_z: str):
         s.z = s.z * fz
         if n in p.raw:
             p.raw[n] = p.raw[n] * fz
+    display = getattr(p, "display_settings", None) or {}
+    for settings in list(display.get("surfaces", {}).values()) + [
+            display.get("properties", {}).get(n) or {} for n in ("Depth", "Thickness")]:
+        for k in ("vmin", "vmax"):
+            if settings.get(k) is not None:
+                settings[k] = float(settings[k]) * fz
     for f in p.faults.values():
         f.trace = [[a * fx, b * fx] for a, b in f.trace]
         f.throw *= fz
@@ -343,6 +357,23 @@ def convert_project(p, new_xy: str, new_z: str):
                     if "gas_entry" in row:
                         row["gas_entry"] *= fz
             _scale_contacts(cfg["contacts"]["contacts"], fx, fz)
+        elif kind == "tool":
+            settings = cfg["settings"]
+            operation = cfg["operation"]
+            if operation == "Plane properties":
+                settings["planes"] = [[name, depth * fz] for name, depth in settings["planes"]]
+                settings["depth_unit"] = new_z
+            elif operation in ("Contact properties", "Fault-block region and segments") and settings.get("volumetrics"):
+                _scale_contacts(settings["volumetrics"]["contacts"], fx, fz)
+            elif operation == "Simple kriging":
+                settings["variogram"]["major"] *= fx
+                settings["variogram"]["minor"] *= fx
+                settings["variogram"]["vert"] *= fz
+            elif operation == "Zone table properties":
+                for zone in settings["zones"]:
+                    zone["dz"] *= fz
+            elif operation == "Petrophysics from facies":
+                _scale_facies(settings, fx, fz)
     dg = p.digitized
     for c in dg.get("contours", []):
         c["z"] = c["z"] * fz

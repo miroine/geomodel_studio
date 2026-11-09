@@ -85,6 +85,30 @@ div.stDownloadButton > button {{ border-radius: 8px; font-weight: 650; border: 1
 .stTabs [aria-selected="true"] {{ background: #E7EEFF; color: {BLUE} !important; }}
 .stTabs [aria-selected="true"] p {{ color: {BLUE} !important; }}
 .footer {{ margin-top: 30px; padding-top: 10px; border-top: 1px solid {LINE}; color: {MUTE}; font-size: 11.5px; }}
+.block-container {{ padding-top: 3.4rem !important; padding-bottom: 4.5rem !important; }}
+.st-key-ribbon {{ background: linear-gradient(180deg, {NAVY}, #0B2A45); border-radius: 10px 10px 0 0; padding: 6px 8px 0 8px; gap: 0 !important; }}
+.st-key-ribbon [data-testid="stHorizontalBlock"], .st-key-ribbon_tools [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap !important; gap: 4px !important; }}
+.st-key-ribbon [data-testid="stColumn"], .st-key-ribbon_tools [data-testid="stColumn"] {{ flex: 0 0 auto !important; width: auto !important; min-width: 0 !important; }}
+.st-key-ribbon div.stButton > button {{ background: transparent; border: none; border-radius: 7px 7px 0 0; color: #C9D6E6; font-size: 12.5px; font-weight: 650; padding: 7px 12px; min-height: 0; white-space: nowrap; }}
+.st-key-ribbon div.stButton > button p {{ color: #C9D6E6 !important; font-size: 12.5px; }}
+.st-key-ribbon div.stButton > button:hover {{ background: #16395C; }}
+.st-key-ribbon div.stButton > button[kind="primary"] {{ background: #F5F8FC; }}
+.st-key-ribbon div.stButton > button[kind="primary"] p {{ color: {NAVY} !important; font-weight: 750; }}
+.st-key-ribbon_tools {{ background: {BG}; border: 1px solid {LINE}; border-top: none; border-radius: 0 0 10px 10px; padding: 8px 10px; margin-bottom: 6px; }}
+.st-key-ribbon_tools div.stButton > button {{ font-size: 12.5px; padding: 5px 12px; min-height: 0; background: #FFFFFF; white-space: nowrap; }}
+.st-key-ribbon_tools div.stButton > button[kind="primary"] {{ background: {BLUE}; color: #FFFFFF; }}
+.breadcrumb {{ color: {MUTE}; font-size: 12px; letter-spacing: .02em; margin: 2px 0 8px 2px; }}
+.breadcrumb span {{ margin: 0 6px; }}
+.breadcrumb b {{ color: {NAVY}; }}
+.statusbar {{ position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000002; display: flex; justify-content: space-between; gap: 16px;
+             background: {NAVY}; color: #C9D6E6; font-size: 11.5px; padding: 5px 16px; }}
+.statusbar span, .statusbar b {{ color: #E4ECF5 !important; }}
+.statusbar i {{ color: #4E6A86; font-style: normal; margin: 0 8px; }}
+.statusbar .sb-left {{ overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }}
+.statusbar .sb-right {{ color: #9FB4CB !important; white-space: nowrap; }}
+.disclaimer {{ margin-top: 10px; font-size: 10.5px; line-height: 1.4; color: {MUTE} !important; }}
+.disclaimer-box {{ border: 1px solid #F0D9A8; background: #FFF9EC; border-left: 4px solid #C5A100; border-radius: 8px; padding: 10px 14px; margin: 6px 0 16px; font-size: 13px; }}
+section[data-testid="stSidebar"] .stTabs [data-baseweb="tab"] {{ padding: 6px 10px; font-size: 12.5px; }}
 </style>
 """
 
@@ -112,8 +136,19 @@ def stepper(stages):
     st.markdown(f'<div class="stepper">{cells}</div>', unsafe_allow_html=True)
 
 
+DISCLAIMER_HTML = ("<b>Disclaimer.</b> GeoModel Studio is built by <b>Merouane Hamdani</b> for <b>non-commercial use only</b>, "
+                   "under the PolyForm Noncommercial License 1.0.0 (see LICENSE). It is a concept-modelling tool provided "
+                   "as is, without warranty, and is not a substitute for validated commercial geomodelling software. "
+                   "Results must be checked by a qualified geoscientist before any decision is based on them.")
+
+
+def disclaimer():
+    st.markdown(f'<div class="disclaimer-box">{DISCLAIMER_HTML}</div>', unsafe_allow_html=True)
+
+
 def footer():
-    st.markdown('<div class="footer">GeoModel Studio &middot; structural framework to simulation grid &middot; MIT License. '
+    st.markdown('<div class="footer">GeoModel Studio &middot; structural framework to simulation grid &middot; '
+                'Built by Merouane Hamdani &middot; Non-commercial use only (PolyForm Noncommercial 1.0.0). '
                 'Vertical-separation fault model with stair-stepped corner-point faults: a concept-modelling tool, '
                 'not a substitute for a full pillar-gridding product.</div>', unsafe_allow_html=True)
 

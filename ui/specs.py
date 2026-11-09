@@ -36,7 +36,7 @@ def base_layout(title=None, **kw):
 
 def map_2d(Z, geom: Geometry, title=None, scale=DEPTH_SCALE, faults: Optional[List[Fault]] = None, wells=None,
            colorbar=None, contour_lines=True, zmid=None, reverse=False, line_color="#333333",
-           contour_interval=0., contour_labels=False, well_paths=None):
+           contour_interval=0., contour_labels=False, well_paths=None, zrange=None):
     colorbar = colorbar or f"Depth ({un.z()})"
     z = _nan(Z)
     if geom.rotation:
@@ -65,6 +65,8 @@ def map_2d(Z, geom: Geometry, title=None, scale=DEPTH_SCALE, faults: Optional[Li
     if zmid is not None:
         d = max(abs(lo - zmid), abs(hi - zmid), 1e-9)
         tr.update(zmin=zmid - d, zmax=zmid + d, zmid=zmid)
+    elif zrange is not None:
+        tr.update(zmin=float(zrange[0]), zmax=float(zrange[1]), zauto=False)
     data = [tr]
     for f in (faults or []):
         P = f.points

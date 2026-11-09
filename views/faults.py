@@ -4,11 +4,58 @@ import pandas as pd
 import streamlit as st
 from core import units as un
 
-from core.faults import Fault, next_color, FAULT_TYPE_INFO
+from core.faults import Fault, next_color, FAULT_TYPE_INFO, FAULT_TYPES, PROFILES
+from core import polygons as pg
 from ui import state as S
 from ui import specs
 from ui.components import map_editor, plotly_view, viewer3d
 from ui.theme import banner, kpis, note
+
+
+def _import(p):
+    with st.expander("Import fault traces from polygon files"):
+        st.caption("RMS .POL / .rmspolygons: X Y Z with 999 999 999 separators. "
+                   "XY text: X Y per line, separated by blank lines or > names. "
+                   "Each part becomes a fault trace; file Z is ignored. Traces are not automatically closed. "
+                   "Set their reference depth below. Existing faults and surfaces are preserved.")
+        xy_unit = st.selectbox("Fault XY unit in file", un.UNITS, index=un.UNITS.index(p.crs["xy_unit"]),
+                               key=S.k("fault_import_xy"))
+        fxy, _ = un.import_factors(p.crs, xy_unit, p.crs["z_unit"])
+        a, b, c = st.columns(3)
+        ftype = a.selectbox("Imported fault type", FAULT_TYPES, key=S.k("fault_import_type"))
+        throw = b.number_input(f"Imported throw ({un.z()})", min_value=0.0, value=50.0, key=S.k("fault_import_throw"))
+        dip = c.number_input("Imported dip (degrees)", min_value=5.0, max_value=90.0, value=65.0, key=S.k("fault_import_dip"))
+        a, b, c = st.columns(3)
+        side = a.selectbox("Imported hanging-wall side", ["left", "right"], key=S.k("fault_import_hw"))
+        profile = b.selectbox("Imported throw profile", PROFILES, key=S.k("fault_import_profile"))
+        zref = c.number_input(f"Imported reference depth ({un.z()}, positive down)", value=2000.0, key=S.k("fault_import_zref"))
+        drag = st.number_input(f"Imported drag-zone width ({un.xy()})", min_value=0.0, value=250.0, key=S.k("fault_import_drag"))
+        files = st.file_uploader("Fault polygon / polyline files", accept_multiple_files=True, key=S.k("fault_import_files"))
+        for upload in files or []:
+            with st.container(border=True):
+                st.markdown(f"**{upload.name}**")
+                try:
+                    ext = upload.name.rsplit(".", 1)[-1].lower()
+                    parser = pg.parse_rms_pol if ext in ("pol", "rmspolygons") else pg.parse
+                    found = parser(upload.getvalue(), default_name=upload.name.rsplit(".", 1)[0], closed=False)
+                except (ValueError, UnicodeError, KeyError, TypeError) as exc:
+                    st.error(f"Could not read fault traces: {exc}")
+                    continue
+                st.caption(", ".join(f"{n} ({len(q.pts)} vertices)" for n, q in found.items()))
+                if st.button("Import as faults", type="primary", key=S.k(f"fault_import_add_{upload.name}")):
+                    for name, line in found.items():
+                        nm, index = name, 2
+                        while nm in p.faults:
+                            nm = f"{name}_{index}"
+                            index += 1
+                        p.faults[nm] = Fault(nm, [[x * fxy, y * fxy] for x, y in line.pts],
+                                             ftype=ftype, throw=float(throw), dip=float(dip), hw_side=side,
+                                             profile=profile, drag=float(drag), zref=float(zref),
+                                             color=next_color(len(p.faults)))
+                    S.sync_fault_step(p)
+                    p.invalidate()
+                    st.session_state["nonce_flt"] = st.session_state.get("nonce_flt", 0) + 1
+                    st.success(f"Imported {len(found)} fault trace(s). Review direction and hanging-wall side in the designer.")
 
 
 def faulted_surface(p, name, faults):
@@ -28,6 +75,7 @@ def render():
     nf = len(p.faults)
     banner("2 - Faults", f"{nf} fault{'s' if nf != 1 else ''} designed on the map - set hanging-wall side, throw and dip, then preview the faulted surface"
            if nf else "Draw fault traces on a depth map and give them throw, dip and a hanging-wall side")
+    _import(p)
     if not S.need_lattice(p):
         return
     if not p.surfaces:

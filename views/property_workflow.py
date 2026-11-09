@@ -12,9 +12,12 @@ from core import facies as fa, geostat as gs, props as pp, property_workflow as 
 from ui import state as S
 from views import facies_objects
 from views import contact_settings
+from views import property_trends
+from views import polygon_property
+from views import facies_trends
 
-STYLES = {"facies": "layering", "calculator": "refinement", "petrophysics": "construction",
-          "stochastic": "conditioning", "saturation": "faults"}
+STYLES = {"facies": "layering", "calculator": "refinement", "polygon": "refinement", "petrophysics": "construction",
+          "stochastic": "conditioning", "saturation": "faults", "tool": "refinement"}
 DOMAIN_LABELS = {"zone": "By zone", "facies": "By facies", "zone_facies": "By zone and facies"}
 
 
@@ -122,6 +125,7 @@ def _facies(cfg, project, key):
         cfg["cond"] = st.text_input("Blocked facies log (optional)", cfg.get("cond", ""), key=key("cond"))
     else:
         cfg["cond"] = ""
+    facies_trends.render(cfg, project, key)
 
 
 def _stochastic(cfg, project, before, key):
@@ -165,6 +169,7 @@ def _stochastic(cfg, project, before, key):
                                         key=key(name + "_bins"), num_rows="dynamic").values.tolist()
         elif pc["dist"] == "values":
             pc["values"] = gs.parse_values(st.text_area(f"{name} target values", ", ".join(map(str, pc["values"])), key=key(name + "_values")))
+    property_trends.render(cfg, project, key)
     st.markdown("**Normal-score correlations and net cut-offs**")
     cfg["corr"] = _records([cfg["corr"]], key("correlations"))[0]
     cfg["cut"] = _records([cfg["cut"]], key("cutoffs"))[0]
@@ -184,13 +189,25 @@ def _configure(job, project, before, namespace="pj"):
     key = lambda field, opts=None: S.k(f"{namespace}_{job['id']}_{field}_{revision}", opts)
     name = st.text_input("Job name", job["name"], key=key("name"))
     kind = job["type"]
-    if kind == "calculator":
+    if kind == "tool":
+        st.caption("Saved property-library operation. Inputs are resolved from the current grid/project when rerun.")
+        cfg["operation"] = _select("Property operation", list(jobs.TOOL_RUNS), cfg["operation"], key("operation"))
+        raw = st.text_area("Operation settings (JSON)", json.dumps(cfg["settings"], indent=2), height=240, key=key("settings"))
+        cfg["settings"] = json.loads(raw)
+        if not isinstance(cfg["settings"], dict):
+            raise ValueError("Operation settings must be a JSON object.")
+    elif kind == "calculator":
         st.caption("Restricted Python, identical to the existing calculator. Assignments create/overwrite arrays; imports and arbitrary Python execution are not allowed.")
         cfg["code"] = st.text_area("Python script", cfg["code"], height=180, key=key("code"))
         cfg["output"] = st.text_input("Output name (single expressions)", cfg.get("output", "RESULT"), key=key("output"))
         cfg["result_kind"] = _select("Result type", pp.KINDS, cfg.get("result_kind", "continuous"), key("kind"))
         cfg["unit"] = st.text_input("Unit", cfg.get("unit", ""), key=key("unit"))
+        if (cfg["result_kind"], cfg["unit"]) != (
+                job["config"].get("result_kind", "continuous"), job["config"].get("unit", "")):
+            cfg.pop("output_metadata", None)
         st.caption("Examples: FACIES = where(FACIES == 2, 3, FACIES)  |  PORO = where(FACIES == 3, 0.25, 0.08)")
+    elif kind == "polygon":
+        polygon_property.controls(cfg, project, key)
     elif kind == "facies":
         _facies(cfg, project, key)
     elif kind == "stochastic":
@@ -200,11 +217,12 @@ def _configure(job, project, before, namespace="pj"):
             cfg["method"] = _select("Saturation model", ["satheight", "archie"], cfg["method"], key("method"))
             cfg["output"] = st.text_input("Saturation output", cfg.get("output", "SW"), key=key("output"))
             if cfg["method"] == "archie":
+                contact_settings.fluid_system(cfg["contacts"]["contacts"], lambda field, current: key(field + "_" + current))
                 cfg["poro"] = st.text_input("Porosity input (fraction)", cfg.get("poro", "PORO"), key=key("poro"))
                 cfg["rt"] = st.text_input("Resistivity input (ohm.m)", cfg.get("rt", "RT"), key=key("rt"))
             else:
                 contact_settings.render(cfg["contacts"]["contacts"], project, key)
-                cfg["gas_curve"] = st.checkbox("Separate gas-zone saturation-height parameters",
+                cfg["gas_curve"] = cfg["contacts"]["contacts"].get("fluid_system", "auto") not in ("gas", "oil") and st.checkbox("Separate gas-zone saturation-height parameters",
                                                value=bool(cfg.get("gas_curve", False)), key=key("gas_curve"))
                 st.caption("Gas-zone parameters apply above GOC, using the same height above the water FWL. This job stores its own contacts.")
         specs = _domain(cfg, project, before, key)
@@ -218,6 +236,7 @@ def _configure(job, project, before, namespace="pj"):
             return dict(a=1.0, m=2.0, n=2.0, rw=0.1)
         _parameter_table(cfg, specs, defaults, key("parameters", [cfg["domain"], cfg.get("facies"), cfg.get("method"), cfg.get("gas_curve")]))
         if kind == "petrophysics":
+            property_trends.render(cfg, project, key)
             cfg["outputs"] = st.multiselect("Output properties", pp.ZONE_PROPS, default=cfg.get("outputs", pp.ZONE_PROPS), key=key("outputs"))
     if st.button("Save job configuration", key=key("save")):
         if not name.strip() or any(j["id"] != job["id"] and j["name"] == name.strip() for j in project.property_jobs):
@@ -284,7 +303,31 @@ def named_job(project, kind):
 
 def render(project):
     st.subheader("Property workflow")
-    st.caption("Jobs run from top to bottom using outputs of earlier jobs. Untick Active to skip a job. "
+    if project.property_history:
+        with st.expander("Property run history"):
+            st.caption("Successful standalone runs are saved automatically as active workflow steps below. "
+                       "Rerunning a saved step adds history, not another step. History preserves the original settings.")
+            unlinked = [r for r in project.property_history if r["status"] == "Completed" and not r.get("job_id")]
+            if unlinked and st.button("Add previous successful runs to workflow", key=S.k("pj_restore_history")):
+                try:
+                    jobs.restore_history(project)
+                except jobs.PropertyWorkflowError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+            for record in reversed(project.property_history):
+                st.markdown(f"**{escape(record['time'])} - {escape(record['name'])} - {escape(record['status'])}**")
+                st.write("Outputs: " + (", ".join(record["outputs"]) or "none"))
+                if record.get("grid_hash"):
+                    st.caption(f"Grid fingerprint: {record['grid_hash']}; units / CRS at execution are in the saved settings below.")
+                if record.get("message"):
+                    st.write(record["message"])
+                st.json(record["settings"])
+                if record.get("crs"):
+                    st.json(record["crs"])
+    else:
+        st.caption("No property runs recorded yet. Older properties may predate run history.")
+    st.caption("Successful standalone runs append active steps automatically. Jobs run from top to bottom using outputs of earlier jobs. Untick Active to skip a job. "
                "Insert calculator jobs anywhere, including between facies and petrophysics.")
     for index, job in enumerate(project.property_jobs):
         if index:

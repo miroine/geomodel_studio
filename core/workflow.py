@@ -165,7 +165,7 @@ def expand_steps(steps: List[dict]):
     """Expand composite ``zone`` steps into primitive steps.  Returns [(original step number, primitive step)]."""
     out = []
     for n, s in enumerate(steps, 1):
-        if s["type"] != "zone":
+        if not s.get("enabled", True) or s["type"] != "zone":
             out.append((n, s))
             continue
         h, top = s["horizon"], s["top"]
@@ -192,7 +192,8 @@ def expand_steps(steps: List[dict]):
 def zone_defs(steps: List[dict]) -> List[dict]:
     """Zone definitions (name, top, base, layering) carried by the zone steps, in step order."""
     return [dict(name=s.get("name") or f"{s['top']}_{s['horizon']}", top=s["top"], base=s["horizon"], nlayers=int(s.get("nlayers", 5)),
-                 style=s.get("style", "proportional"), dz=float(s.get("dz", 10.0))) for s in steps if s["type"] == "zone"]
+                 style=s.get("style", "proportional"), dz=float(s.get("dz", 10.0)))
+            for s in steps if s.get("enabled", True) and s["type"] == "zone"]
 
 
 def describe(step: dict) -> str:
@@ -256,7 +257,7 @@ def run_workflow(steps: List[dict], surfaces: Dict[str, Surface], faults: Dict[s
 
     active_names: List[str] = []
     for s in steps:
-        if s["type"] == "faults":
+        if s.get("enabled", True) and s["type"] == "faults":
             for n in s.get("faults", []):
                 if n in faults and n not in active_names:
                     active_names.append(n)
@@ -269,6 +270,9 @@ def run_workflow(steps: List[dict], surfaces: Dict[str, Surface], faults: Dict[s
             raise WorkflowError(f"Horizon '{h}' is used before it is defined - move its step earlier.")
 
     for n, s in expand_steps(steps):
+        if not s.get("enabled", True):
+            log.append(f"Step {n}: skipped (inactive)")
+            continue
         t = s["type"]
         try:
             if t == "surface":

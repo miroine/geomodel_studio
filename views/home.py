@@ -1,14 +1,13 @@
 """Project page: model area, demo, save / load."""
 import streamlit as st
-from core import units as un
 
 from core import project as pj
 from core import units as un
 from core.demo import build_demo
 from core.project import Project
-from core.surface import Geometry
+from core.surface import Geometry, surface_area_values
 from ui import state as S
-from ui.theme import banner, kpis, stepper, note
+from ui.theme import banner, disclaimer, kpis, stepper, note
 
 
 def _crs_panel(p):
@@ -85,7 +84,7 @@ def render():
         st_ = "grid built" if p.grid else ("framework built" if p.structure else "framework not yet built")
         title = f"{len(p.surfaces)} surfaces and {len(p.faults)} faults over {g.ncol * g.xinc / 1000:.1f} x {g.nrow * g.yinc / 1000:.1f} km - {st_}"
     banner("Project", title)
-
+    disclaimer()
     stepper([
         ("1 · Inputs", "Maps, faults, wells and picks", bool(p.surfaces or p.faults or p.wells or not p.tops.empty)),
         ("2 · Structure", "Build and quality-check horizons", p.structure is not None),
@@ -99,16 +98,30 @@ def render():
     c1, c2 = st.columns([3, 2], gap="large")
     with c1:
         st.subheader("Model area")
+        if p.surfaces:
+            names = list(p.surfaces)
+            source = st.selectbox("Surface for model area", names, key=S.k("area_surface", names))
+            st.caption("Load a surface's full grid extent in project XY units, then review and set the model area. "
+                       "Rotated surfaces use their north-up bounding rectangle; their CRS is not inferred.")
+            if st.button("Load area from surface", key=S.k("area_from_surface")):
+                try:
+                    area = surface_area_values(p.surfaces[source].geom)
+                except ValueError as exc:
+                    st.error(f"Cannot use surface for model area: {exc}")
+                else:
+                    for key, value in zip(("lx0", "lx1", "ly0", "ly1", "ldx", "ldy"), area):
+                        st.session_state[S.k(key)] = float(value)
+                    st.rerun()
         g = p.lattice
         d = (g.xori, g.xori + (g.ncol - 1) * g.xinc, g.yori, g.yori + (g.nrow - 1) * g.yinc, g.xinc, g.yinc) if g else (0.0, 10000.0, 0.0, 8000.0, 100.0, 100.0)
         a, b, c = st.columns(3)
-        xmin = a.number_input("X min", value=float(d[0]), key=S.k("lx0"), format="%.1f")
-        xmax = b.number_input("X max", value=float(d[1]), key=S.k("lx1"), format="%.1f")
-        dx = c.number_input(f"dx ({un.xy()})", value=float(d[4]), min_value=1.0, key=S.k("ldx"))
+        xmin = a.number_input("X min", value=float(d[0]), key=S.k("lx0"), format="%.12f")
+        xmax = b.number_input("X max", value=float(d[1]), key=S.k("lx1"), format="%.12f")
+        dx = c.number_input(f"dx ({un.xy()})", value=float(d[4]), min_value=1e-12, key=S.k("ldx"), format="%.12f")
         a, b, c = st.columns(3)
-        ymin = a.number_input("Y min", value=float(d[2]), key=S.k("ly0"), format="%.1f")
-        ymax = b.number_input("Y max", value=float(d[3]), key=S.k("ly1"), format="%.1f")
-        dy = c.number_input(f"dy ({un.xy()})", value=float(d[5]), min_value=1.0, key=S.k("ldy"))
+        ymin = a.number_input("Y min", value=float(d[2]), key=S.k("ly0"), format="%.12f")
+        ymax = b.number_input("Y max", value=float(d[3]), key=S.k("ly1"), format="%.12f")
+        dy = c.number_input(f"dy ({un.xy()})", value=float(d[5]), min_value=1e-12, key=S.k("ldy"), format="%.12f")
         ncol = int(round((xmax - xmin) / dx)) + 1
         nrow = int(round((ymax - ymin) / dy)) + 1
         st.caption(f"Lattice: {ncol} x {nrow} nodes ({ncol * nrow:,}). All horizons are evaluated on this lattice; "
@@ -148,7 +161,7 @@ def render():
 
     with st.expander("How this app models structure (read once)"):
         st.markdown("""
-**Workflow** &nbsp; Surfaces (+ filters) -> Polygons -> Faults -> Wells and tops -> *Structural model* (ordered steps) -> Zones & layering -> 3D grid -> Properties -> Volumetrics / Analysis -> Export. Every step produces an *object* that appears in the tree on the left (like the Petrel / RMS data tree); click one to open it. The **3D window** shows them all together.
+**Workflow** &nbsp; The ribbon at the top follows the modelling process: *Project* -> *Input data* (surfaces, polygons, faults, wells, tops) -> *Structural framework* -> *Gridding* (zones, layering, 3D grid) -> *Property modelling* -> *Volumetrics* -> *Analysis & QC* -> *Export*. The tools of the selected domain appear under the ribbon. The left panel has **Input** and **Models** object trees (like the Petrel / RMS data tree; click an object to open it) and a numbered **Processes** flow with the status of each stage. Every page has a **Guide** panel with step-by-step instructions (also in the `docs/` folder), and the status bar at the bottom shows the project, CRS, units and build state. The **3D window** shows all objects together.
 
 **Surface filters** are non-destructive: each surface keeps its raw map and an ordered, editable stack of operations (clip by polygon, value range, spikes, slopes, hole filling) with undo / redo and presets. A **model boundary** polygon trims the grid extent and switches off cells outside it.
 

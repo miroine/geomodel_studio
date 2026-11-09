@@ -89,21 +89,66 @@ def mask_points(X, Y, poly: Polygon, buffer: float = 0.0) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-def _clean(pts):
+def _clean(pts, closed=True):
     pts = [p for i, p in enumerate(pts) if i == 0 or p != pts[i - 1]]
-    if len(pts) > 1 and pts[0] == pts[-1]:
+    if closed and len(pts) > 1 and pts[0] == pts[-1]:
         pts = pts[:-1]
     return pts
 
 
-def parse(data: bytes, default_name="Polygon") -> Dict[str, Polygon]:
-    """Read polygons from XY text (blank line, '>' or a text line starts a new polygon) or GeoJSON."""
+def parse_rms_pol(data: bytes, default_name="Polygon", *, closed=True) -> Dict[str, Polygon]:
+    """Read RMS ASCII X Y Z parts; closed=False accepts open two-point traces."""
+    text = data.decode("utf-8-sig")
+    out: Dict[str, Polygon] = {}
+    pts = []
+
+    def finish():
+        if not pts:
+            return
+        cleaned = _clean(pts, closed=closed)
+        minimum = 3 if closed else 2
+        if len(cleaned) < minimum or len({tuple(p) for p in cleaned}) < minimum:
+            raise ValueError(f"RMS polygon / trace {len(out) + 1} has fewer than {minimum} distinct vertices.")
+        name = f"{default_name}_{len(out) + 1}"
+        out[name] = Polygon(name, cleaned)
+        pts.clear()
+
+    for line_no, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 3:
+            raise ValueError(f"RMS polygon line {line_no} must contain exactly X Y Z.")
+        try:
+            x, y, z = (float(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(f"RMS polygon line {line_no} contains a non-numeric coordinate.") from exc
+        if not np.isfinite([x, y, z]).all():
+            raise ValueError(f"RMS polygon line {line_no} contains a non-finite coordinate.")
+        if x == 999.0 and y == 999.0 and z == 999.0:
+            finish()
+        else:
+            pts.append([x, y])
+    finish()
+    if not out:
+        raise ValueError("No valid polygon / trace found in the RMS file.")
+    return out
+
+
+def parse(data: bytes, default_name="Polygon", *, closed=True) -> Dict[str, Polygon]:
+    """Read XY text / GeoJSON polygons; closed=False also accepts two-point text traces."""
     text = data.decode("utf-8", errors="ignore").strip()
     out: Dict[str, Polygon] = {}
 
     def add(name, pts):
-        pts = _clean([[float(a), float(b)] for a, b in pts])
-        if len(pts) >= 3:
+        pts = _clean([[float(a), float(b)] for a, b in pts], closed=closed)
+        minimum = 3 if closed else 2
+        if not np.isfinite(pts).all():
+            raise ValueError("Polygon / trace coordinates must be finite.")
+        if not closed and len({tuple(p) for p in pts}) < minimum:
+            raise ValueError("A fault trace needs at least 2 distinct X Y vertices.")
+        if len(pts) >= minimum and len({tuple(p) for p in pts}) >= minimum:
             nm, k = name, 2
             while nm in out:
                 nm = f"{name}_{k}"
@@ -146,7 +191,7 @@ def parse(data: bytes, default_name="Polygon") -> Dict[str, Polygon]:
         elif s.startswith(">") and len(s) > 1:
             name = s[1:].strip() or default_name
     if not out:
-        raise ValueError("No polygon with at least 3 X Y vertices found.")
+        raise ValueError(f"No polygon / trace with at least {3 if closed else 2} distinct X Y vertices found.")
     return out
 
 

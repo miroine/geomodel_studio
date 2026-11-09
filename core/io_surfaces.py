@@ -104,7 +104,7 @@ def write_esri_ascii(s: Surface, nodata=-9999.0) -> bytes:
 # IRAP ASCII (classic)
 # ---------------------------------------------------------------------------
 # Standard IRAP ASCII header:  -996 NY XINC YINC / XORI XMAX YORI YMAX / NX ROT X0ORI Y0ORI / 7 ints,
-# then node values with the Y index running fastest (column by column).  The pure-Python readers are a
+# then node values with the X index running fastest (row by row). The pure-Python readers are a
 # fallback for machines without xtgeo; xtgeo is always used first when it is installed.
 def write_irap_ascii(s: Surface) -> bytes:
     g = s.geom
@@ -115,7 +115,7 @@ def write_irap_ascii(s: Surface) -> bytes:
     out.write(f"{g.xori:.6f} {xmax:.6f} {g.yori:.6f} {ymax:.6f}\n")
     out.write(f"{g.ncol} {g.rotation:.6f} {g.xori:.6f} {g.yori:.6f}\n")
     out.write("0 0 0 0 0 0 0\n")
-    v = np.where(np.isnan(s.z), 9999900.0, s.z).T.ravel()          # (nx, ny) with j fastest
+    v = np.where(np.isnan(s.z), 9999900.0, s.z).ravel()
     for k in range(0, v.size, 5):
         out.write(" ".join(f"{x:.4f}" for x in v[k:k + 5]) + "\n")
     return out.getvalue().encode()
@@ -131,7 +131,7 @@ def read_irap_ascii_py(data: bytes, name="Surface") -> Surface:
     vals = np.array(toks[19:], dtype=float)
     if vals.size != nx * ny:
         raise ValueError(f"IRAP ASCII: expected {nx * ny} values, found {vals.size}")
-    z = vals.reshape(nx, ny).T                                  # Y fastest
+    z = vals.reshape(ny, nx)
     z = np.where(z >= IRAP_UNDEF * 0.999, np.nan, z)
     return Surface(name, Geometry(xori, yori, xinc, yinc, nx, ny, rot), z, "irap_ascii")
 
@@ -160,7 +160,7 @@ def read_irap_binary_py(data: bytes, name="Surface") -> Surface:
         p = rec()
         vals.extend(struct.unpack(f">{len(p) // 4}f", p))
     v = np.array(vals[:nx * ny], dtype=float)
-    z = v.reshape(nx, ny).T                     # Y (j) varies fastest, same as IRAP ASCII
+    z = v.reshape(ny, nx)
     z = np.where(z >= IRAP_UNDEF * 0.999, np.nan, z)
     return Surface(name, Geometry(xori, yori, xinc, yinc, nx, ny, rot), z, "irap_binary")
 
@@ -177,7 +177,7 @@ def write_irap_binary_py(s: Surface) -> bytes:
     rec(struct.pack(">iiffffff", -996, g.nrow, g.xori, xmax, g.yori, ymax, g.xinc, g.yinc))
     rec(struct.pack(">ifff", g.ncol, g.rotation, g.xori, g.yori))
     rec(struct.pack(">7i", 0, 0, 0, 0, 0, 0, 0))
-    v = np.where(np.isnan(s.z), IRAP_UNDEF, s.z).T.astype(">f4").ravel()
+    v = np.where(np.isnan(s.z), IRAP_UNDEF, s.z).astype(">f4").ravel()
     for k in range(0, v.size, 9):
         rec(v[k:k + 9].tobytes())
     return bytes(out)
@@ -244,6 +244,8 @@ def read_xyz(data: bytes) -> np.ndarray:
 # ---------------------------------------------------------------------------
 def read_any(data: bytes, filename: str = "surface", name: str = None) -> Tuple[str, Union[Surface, np.ndarray]]:
     """Return ('surface', Surface) or ('points', Nx3 array)."""
+    if os.path.splitext(filename)[1].lower() in (".pol", ".rmspolygons"):
+        raise ValueError("This is an RMS polygon file. Import it on the Polygons page, not as surface points.")
     name = name or os.path.splitext(os.path.basename(filename))[0]
     fmt = sniff_format(data, filename)
     if fmt == "esri_ascii":

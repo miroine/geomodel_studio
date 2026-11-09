@@ -40,6 +40,7 @@ class Project:
     stochastic: dict = field(default_factory=dict)                          # settings of the stochastic property workflow
     property_models: dict = field(default_factory=dict)                     # zone/facies petrophysics and saturation settings
     property_jobs: List[dict] = field(default_factory=list)                  # ordered executable property workflow snapshots
+    property_history: List[dict] = field(default_factory=list)               # historical modelling executions
     display_settings: dict = field(default_factory=dict)                    # saved property/surface colour preferences
     digitized: dict = field(default_factory=lambda: dict(contours=[], points=[], faults=[], calib=None))
     polygons: Dict[str, Polygon] = field(default_factory=dict)
@@ -198,6 +199,7 @@ def to_bytes(p: Project) -> bytes:
         filter_presets=p.filter_presets, crs=p.crs, properties=[v.meta() for v in p.properties.values()], stochastic=p.stochastic, volumetrics=p.volumetrics, fault_mult=p.fault_mult, upscale=p.upscale, facies=p.facies,
         property_models=p.property_models,
         property_jobs=p.property_jobs,
+        property_history=p.property_history,
         display_settings=p.display_settings,
         logs={w: dict(curves=list(l["curves"]), units=l.get("units", {})) for w, l in p.logs.items()},
     )
@@ -259,6 +261,7 @@ def from_bytes(data: bytes) -> Project:
     p.facies = meta.get("facies", {}) or {}
     p.property_models = meta.get("property_models", {}) or {}
     p.property_jobs = meta.get("property_jobs", []) or []
+    p.property_history = meta.get("property_history", []) or []
     p.display_settings = meta.get("display_settings", {}) or {}
     if ldata is not None and meta.get("logs"):
         ln = np.load(io.BytesIO(ldata))

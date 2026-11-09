@@ -239,7 +239,7 @@ def check_config(cfg: dict) -> List[str]:
 
 
 # ---------------------------------------------------------------- the workflow
-def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray]] = None, properties=None) -> Dict[str, dict]:
+def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray]] = None, properties=None, surfaces=None) -> Dict[str, dict]:
     """Run the stochastic workflow.  Returns {name: dict(values (nk,nj,ni), kind, unit)} for all realisations.
 
     ``cond`` = {"PORO"|"PERM"|"NTG": blocked-well array (nk,nj,ni), NaN = no data} conditions the realisations: the Gaussian
@@ -251,6 +251,12 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
         raise GeostatError(" ".join(errs))
     shape = (grid.nk, grid.nj, grid.ni)
     act = grid.actnum > 0
+    from . import property_trends as trends
+    try:
+        offsets = {n: trends.offset(grid, cfg.get("trends", {}).get(n, {}), surfaces)
+                   for n in PROPS if cfg["props"][n]["enabled"]}
+    except trends.TrendError as exc:
+        raise GeostatError(str(exc)) from exc
     mode = cfg.get("domain", "zone")
     if mode not in ("zone", "zone_facies"):
         raise GeostatError(f"Unknown stochastic domain: {mode}")
@@ -326,7 +332,8 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
                         continue
                     d = sub_[kk, jj, ii].astype(float)
                     pc = cfg["props"][n]
-                    ds = prob_scores(pc["dist"], rows[n], dict(bins=pc["bins"], values=pc["values"]), d)
+                    ds = prob_scores(pc["dist"], rows[n], dict(bins=pc["bins"], values=pc["values"]),
+                                     d - offsets[n][ks][kk, jj, ii])
                     fields[n] = condition_field(fields[n], kk, jj, ii, ds, uc_, vc_, dz, rows[n], rel_angle(rows[n]["azimuth"], grid.angle))
                     exact[n] = (kk, jj, ii, d)
             tmp = {}
@@ -351,7 +358,15 @@ def simulate(grid, cfg: dict, progress=None, cond: Optional[Dict[str, np.ndarray
                     else:
                         u = ndtr(fields[n]) if n in exact else rank_uniform(fields[n])
                     v = quantile(pcfg["dist"], u, row, dict(bins=pcfg["bins"], values=pcfg["values"]))
-                v = np.clip(v, row["vmin"] if row else -np.inf, row["vmax"] if row else np.inf)
+                v = v + offsets[n][ks]
+                lower = float(row["vmin"]) if row else -np.inf
+                upper = float(row["vmax"]) if row else np.inf
+                trend = cfg.get("trends", {}).get(n, {})
+                if trend.get("depth_enabled") or trend.get("map_enabled"):
+                    lower = max(lower, 0.0)
+                    if n != "PERM":
+                        upper = min(upper, 1.0)
+                v = np.clip(v, lower, upper)
                 if n in exact:
                     kk, jj, ii, d = exact[n]
                     v = np.array(v, float)

@@ -6,10 +6,12 @@ from core import petrophysics as petro
 from core import props as pp
 from core import volumetrics as vol
 from core import units as un
+from core import property_history
 from ui import state as S
 from ui.theme import kpis
 from views import property_workflow as job_view
 from views import contact_settings
+from views import property_trends
 
 LABELS = {"zone": "By zone", "facies": "By facies", "zone_facies": "By zone and facies"}
 
@@ -60,7 +62,7 @@ def render_petrophysics(p, g):
         return
     st.subheader("Petrophysical modelling")
     st.caption("Assign porosity, permeability and net-to-gross by zone, facies, or their intersection. "
-               "This table creates constant values in each domain. Use Stochastic by zone / facies or the facies simulation "
+               "This table sets domain base values; optional depth and map trends add spatial variation. Use Stochastic by zone / facies or the facies simulation "
                "petrophysics step for spatially varying distributions.")
     selected = _domain(p, g, "pm")
     if selected is None:
@@ -76,6 +78,7 @@ def render_petrophysics(p, g):
         return row
 
     cfg = _table(p, "petrophysics", mode, facies, domains, defaults)
+    property_trends.render(cfg, p, lambda field, opts=None: S.k("pm_trend_" + field, opts))
     st.caption("poro / ntg: fractions [0, 1]; permx: mD; kykx = PERMY/PERMX; kvkh = PERMZ/PERMX. "
                "Parameters in this table do not change the zone-definition table.")
     outputs = st.multiselect("Output properties", pp.ZONE_PROPS, default=pp.ZONE_PROPS, key=S.k("pm_outputs"))
@@ -85,11 +88,13 @@ def render_petrophysics(p, g):
         approved = st.checkbox("Replace existing outputs: " + ", ".join(existing), key=S.k("pm_replace", existing))
     if st.button("Model petrophysical properties", type="primary", disabled=not outputs or not approved, key=S.k("pm_run")):
         try:
-            result = petro.model_petrophysics(g, p.properties, mode, facies, cfg["rows"])
+            result = petro.model_petrophysics(g, p.properties, mode, facies, cfg["rows"], cfg.get("trends"), p.surfaces)
         except petro.PetroError as exc:
+            property_history.record(p, "Domain assignments", dict(cfg, outputs=outputs), [], status="Failed", message=str(exc))
             st.error(str(exc))
         else:
             p.properties.update({name: result[name] for name in outputs})
+            property_history.record(p, "Domain assignments", dict(cfg, outputs=outputs), outputs)
             st.success("Stored " + ", ".join(outputs) + ". Inspect them in QC & tools.")
 
 
@@ -114,14 +119,19 @@ def render_saturation(p, g):
             st.error(f"Contact configuration: {exc}")
             return
         st.caption("Standalone contacts are shared with Volumetrics. Entry height uses the project depth unit.")
-        gas_curve = st.checkbox("Separate gas-zone saturation-height parameters", key=S.k("swm_gas_curve"))
+        system = p.volumetrics["contacts"].get("fluid_system", "auto")
+        gas_curve = system not in ("gas", "oil") and st.checkbox("Separate gas-zone saturation-height parameters", key=S.k("swm_gas_curve"))
+        if system == "gas":
+            st.caption("The base saturation-height parameters describe the gas-water system.")
         defaults = dict(swirr=0.2, entry=2.0, lam=0.5)
         if gas_curve:
             defaults.update(gas_swirr=0.1, gas_entry=1., gas_lam=0.5)
     else:
+        contact_settings.fluid_system(p.volumetrics["contacts"], lambda field, current: S.k("swm_" + field + "_" + current))
         st.caption("Sw = (a * Rw / (PORO^m * Rt))^(1/n), clipped to [0, 1]. "
                    "Archie assumes a clean formation; it is not a shaly-sand saturation model. "
-                   "PORO must be a fraction, Rt and Rw must both be in ohm.m; calibrate exponents and Rw to your data.")
+                   "PORO must be a fraction, Rt and Rw must both be in ohm.m; calibrate exponents and Rw to your data. "
+                   "Fluid choice affects volumetrics, not the Archie equation.")
         defaults = dict(a=1.0, m=2.0, n=2.0, rw=0.1)
     cfg = _table(p, "saturation_" + method, mode, facies, domains, lambda _domain: defaults)
     cfg["method"] = method
@@ -154,11 +164,13 @@ def render_saturation(p, g):
         try:
             values = petro.model_saturation(g, p.properties, cfg, p.volumetrics)
         except petro.PetroError as exc:
+            property_history.record(p, "Water saturation", dict(cfg, output=name, contacts=p.volumetrics), [], status="Failed", message=str(exc))
             st.error(str(exc))
         else:
             p.properties[name] = pp.make_property(g, name, values, unit="frac", source="saturation",
                                                   expr=f"{method} by {mode}")
             cfg["output"] = name
+            property_history.record(p, "Water saturation", dict(cfg, contacts=p.volumetrics), [name])
             st.success(f"Stored {name}. Use QC & tools to inspect the 3D result, layers, and zone statistics.")
     prop = p.properties.get(name)
     if prop is not None and prop.source == "saturation" and prop.values.shape == g.actnum.shape:

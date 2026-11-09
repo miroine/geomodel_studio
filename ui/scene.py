@@ -38,6 +38,32 @@ def display_stops(settings, default):
     return list(stops)
 
 
+def display_range(settings, lo, hi, log=False):
+    """Apply saved ``vmin``/``vmax`` colour-range overrides (data units) to an automatic (lo, hi) range."""
+    settings = settings or {}
+    out = []
+    for key, auto in (("vmin", lo), ("vmax", hi)):
+        value = settings.get(key)
+        if value is None:
+            out.append(auto)
+            continue
+        value = float(value)
+        if not np.isfinite(value):
+            raise ValueError("Colour range limits must be finite numbers.")
+        if log:
+            if value <= 0:
+                raise ValueError("Logarithmic colour range limits must be positive.")
+            value = float(np.log10(value))
+        out.append(value)
+    if not out[0] < out[1]:
+        raise ValueError("Colour range minimum must be smaller than maximum.")
+    return out[0], out[1]
+
+
+def has_range(settings):
+    return bool(settings) and (settings.get("vmin") is not None or settings.get("vmax") is not None)
+
+
 def property_stops(prop):
     """Water saturation increases toward blue; other continuous properties toward red."""
     return WEBVIZ_PHYSICS if prop.upper() in ("SW", "SWAT", "WATER SATURATION", "DEPTH", "LAYER (K)") else WEBVIZ_PHYSICS[::-1]
@@ -170,6 +196,8 @@ class Scene:
                    color=color or theme.BLUE, visible=visible, opacity=opacity)
         if color_by_depth:
             lo, hi = vrange or (float(np.nanmin(zz)), float(np.nanmax(zz)))
+            if has_range(display):
+                lo, hi = display_range(display, lo, hi)
             stops = display_stops(display or {}, DEPTH_STOPS)
             obj["col"] = b64(colorize(zz[valid], lo, hi, stops), np.uint8)
             obj["legend"] = legend_ramp(f"Depth ({un.z()})", lo, hi, stops)
@@ -297,7 +325,7 @@ class Scene:
         return self.add(dict(name=name, group=group, type="points", pos=b64(pos, np.float32), color=color, size=6), pos)
 
     def grid(self, grid, prop="Zone", i0=0, j0=0, group="3D grid", name="3D grid", opacity=1.0, max_faces=120_000, props=None,
-             layer_mask=None, display=None):
+             layer_mask=None, display=None, cell_colors=None, color_legend=None):
         sc, legend = grid_property(grid, prop, props, display)
         V, T, S, ids = grid.exterior_faces(i0, j0, sc["values"], max_faces=max_faces,
                                           layer_mask=layer_mask, return_cell_ids=True)
@@ -307,6 +335,14 @@ class Scene:
         for c in range(3):
             vs[T[:, c]] = S
         rgb = _property_colors(vs, sc)
+        if cell_colors is not None:
+            colors = np.asarray(cell_colors)
+            if colors.shape != (*grid.actnum.shape, 3) or not np.isfinite(colors).all() or (colors < 0).any() or (colors > 255).any():
+                raise ValueError("Grid cell colours must be finite RGB values [0, 255] with shape (nk, nj, ni, 3).")
+            triangle_colors = colors.reshape(-1, 3)[ids]
+            for c in range(3):
+                rgb[T[:, c]] = triangle_colors
+            legend = color_legend if color_legend is not None else legend
         ox, oy = self.off(V[:, 0], V[:, 1])
         pos = np.column_stack([ox, oy, V[:, 2]]).astype(np.float32)
         nf = len(V) // 4
@@ -375,6 +411,10 @@ def grid_property(grid, prop: str, props=None, display=None):
     else:
         scale["stops"] = display_stops(settings, scale["stops"])
         legend["colors"] = scale["stops"]
+        if has_range(settings):
+            lo, hi = display_range(settings, scale["vmin"], scale["vmax"], log=prop.upper().startswith("PERM"))
+            scale["vmin"], scale["vmax"] = lo, hi
+            legend["vmin"], legend["vmax"] = f"{lo:.3g}", f"{hi:.3g}"
     return scale, legend
 
 

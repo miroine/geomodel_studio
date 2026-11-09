@@ -11,6 +11,8 @@ from core import logs as lg
 from core import facies as fa
 from core import petrophysics as petro
 from core import volumetrics as vol
+from core import polygon_property as polygon_assignment
+from core import property_history
 from ui import state as S
 from ui import specs
 from ui.components import plotly_view, viewer3d
@@ -19,6 +21,8 @@ from views import petrophysics as petro_view
 from views import property_workflow as job_view
 from views import facies_objects
 from views import property_results
+from views import polygon_property
+from views import facies_trends
 
 EXAMPLES = {
     "Porosity-depth trend": "PORO = clip(0.34 * exp(-DEPTH / 7000), 0.02, 0.35)",
@@ -34,9 +38,16 @@ EXAMPLES = {
 
 def _table(p, g):
     rows = []
+    latest = {}
+    for run in p.property_history:
+        if run["status"] == "Completed":
+            for name in run["outputs"]:
+                latest[name] = run
     for n, pr in p.properties.items():
         s = pr.stats(g.actnum) if pr.values.shape == (g.nk, g.nj, g.ni) else {}
+        run = latest.get(n, {})
         rows.append({"Property": n, "Type": pr.kind, "Unit": pr.unit, "Source": pr.source, "Stale": "yes" if pr.stale else "",
+                     "Last recorded run": run.get("name", ""), "Run time (UTC)": run.get("time", ""),
                      "Min": s.get("min"), "Mean": s.get("mean"), "Max": s.get("max"), "Std": s.get("std")})
     return pd.DataFrame(rows)
 
@@ -58,7 +69,7 @@ def render():
     with workflow_tab:
         job_view.render(p)
     with petro_tab:
-        parameter_tab, t5 = st.tabs(["Zone / facies parameters", "Stochastic by zone / facies"])
+        parameter_tab, t5 = st.tabs(["Domain assignments", "Stochastic by zone / facies"])
         with parameter_tab:
             petro_view.render_petrophysics(p, g)
     with saturation_tab:
@@ -73,10 +84,15 @@ def render():
     with t8:
         _facies(p, g)
 
+    with t2:
+        _calculator(p, g)
+
     with t1:
         c1, c2, c3 = st.columns(3)
         if c1.button("Populate PORO, PERMX/Y/Z, NTG from the zone table", type="primary", key=S.k("pr_zone")):
-            p.properties.update(pp.zone_defaults(g))
+            result = pp.zone_defaults(g)
+            p.properties.update(result)
+            property_history.record(p, "Zone table properties", {"zones": [z.to_dict() for z in g.zones]}, result)
             st.rerun()
         if c2.button("Recompute stale properties", disabled=not stale, key=S.k("pr_recomp")):
             for m in pp.recompute_stale(p.properties, g):
@@ -84,20 +100,24 @@ def render():
             for v in p.properties.values():                  # anything still stale that could not be recomputed keeps its flag
                 if v.stale and v.source in ("manual", "import"):
                     v.stale = False
+            refreshed = [name for name in stale if name in p.properties and not p.properties[name].stale]
+            property_history.record(p, "Recompute stale properties", {"requested": stale}, refreshed)
             st.rerun()
         with st.expander("Generate geometric properties (depth, zone number, I / J / K, ...)", expanded=not p.properties):
             gsel = st.multiselect("Properties", list(pp.GEO_PROPS), default=["DEPTH", "DZ", "ZONE", "K", "ZFRAC", "VOLUME"],
                                   format_func=lambda n: f"{n} - {pp.GEO_PROPS[n][2]}", key=S.k("pr_geo"))
             if st.button("Generate", disabled=not gsel, key=S.k("pr_geogen")):
                 p.properties.update(pp.geometry_properties(g, gsel))
+                property_history.record(p, "Generate geometric properties", {"properties": gsel}, gsel)
                 st.rerun()
             st.caption("Snapshots stored as ordinary properties (colour them, export them, use them in the calculator). "
                        "The calculator also offers these as live read-only variables.")
         if stale:
             st.warning("The grid geometry changed after these were made: " + ", ".join(stale) + ". Recompute them (zone and calculator "
-                       "properties can be regenerated).")
+                       "properties can be regenerated; polygon assignments must be rerun).")
         if p.properties:
             st.dataframe(_table(p, g).round(4), hide_index=True)
+            st.caption("Last recorded run refers to the latest completed history entry; older or unrecorded changes may not be represented.")
         else:
             note("No properties yet. Populate from the zone table, or use the calculator to create your own.")
         with st.expander("Create a constant property"):
@@ -111,7 +131,26 @@ def render():
                     st.error("Use a simple name that is not a geometry variable.")
                 else:
                     p.properties[nm] = pp.make_property(g, nm, val, kind, unit, "manual")
+                    property_history.record(p, "Constant property", dict(name=nm, value=val, kind=kind, unit=unit), [nm])
                     st.rerun()
+        with st.expander("Assign property using a polygon"):
+            cfg = {}
+            polygon_property.controls(cfg, p, lambda field, opts=None: S.k("pr_poly_" + field, opts))
+            exists = cfg["output"] in p.properties
+            approved = not exists or st.checkbox("Replace the existing property with this assignment",
+                                                  key=S.k("pr_poly_confirm"))
+            if st.button("Apply polygon assignment", disabled=not approved or not p.polygons, key=S.k("pr_poly_apply")):
+                try:
+                    result = polygon_assignment.assign(g, p.properties, p.polygons.get(cfg["polygon"]), cfg)
+                except (ValueError, KeyError, TypeError, OverflowError) as exc:
+                    st.error(f"Polygon assignment: {exc}")
+                else:
+                    p.properties[result.name] = result
+                    property_history.record(p, "Polygon property assignment", cfg, [result.name])
+                    st.rerun()
+        with st.container(border=True):
+            st.subheader("Python calculator")
+            _calculator(p, g, prefix="pr_lib", named=False)
         if p.properties:
             with st.expander("Rename / delete"):
                 a, b, c = st.columns([2, 2, 1])
@@ -132,9 +171,6 @@ def render():
         if long_:
             st.caption("Names longer than 8 characters (" + ", ".join(long_) + ") cannot be written as Eclipse keywords.")
 
-    with t2:
-        _calculator(p, g)
-
     with t3:
         _property_qc(p, g)
 
@@ -145,31 +181,36 @@ def render():
         _stochastic(p, g)
 
 
-def _calculator(p, g):
-    if not job_view.named_job(p, "calculator"):
+def _calculator(p, g, prefix="pr", named=True):
+    key = lambda name: S.k(prefix + "_" + name)
+    if not named or not job_view.named_job(p, "calculator"):
         st.caption("A restricted Python calculator working on whole grid arrays. Existing properties and the geometry variables are available "
                    "by name; assignments create or overwrite properties.")
         a, b = st.columns([3, 2])
-        ex = b.selectbox("Examples", list(EXAMPLES), key=S.k("pr_ex"))
-        b.button("Load example", key=S.k("pr_exld"), on_click=lambda: st.session_state.__setitem__(S.k("pr_code"), EXAMPLES[st.session_state[S.k("pr_ex")]]))
-        code = a.text_area("Script", value=EXAMPLES["Porosity-depth trend"], height=180, key=S.k("pr_code"))
+        ex = b.selectbox("Examples", list(EXAMPLES), key=key("ex"))
+        b.button("Load example", key=key("exld"), on_click=lambda: st.session_state.__setitem__(key("code"), EXAMPLES[st.session_state[key("ex")]]))
+        code = a.text_area("Script", value=EXAMPLES["Porosity-depth trend"], height=180, key=key("code"))
         c1, c2, c3 = st.columns(3)
-        out_name = c1.text_input("Output name (single-expression scripts)", "RESULT", key=S.k("pr_out"))
-        kind = c2.selectbox("Result type", pp.KINDS, key=S.k("pr_rkind"))
-        unit = c3.text_input("Unit", "", key=S.k("pr_runit"))
-        if st.button("Run and store", type="primary", key=S.k("pr_run")):
+        out_name = c1.text_input("Output name (single-expression scripts)", "RESULT", key=key("out"))
+        kind = c2.selectbox("Result type", pp.KINDS, key=key("rkind"))
+        unit = c3.text_input("Unit", "", key=key("runit"))
+        if st.button("Run and store", type="primary", key=key("run")):
+            settings = dict(code=code, output=out_name, kind=kind, unit=unit)
             try:
                 res = pp.run_calculator(code, g, p.properties, out_name)
                 for n, v in res.items():
                     old = p.properties.get(n)
                     p.properties[n] = pp.make_property(g, n, v, kind if not old or n == out_name or kind != "continuous" else old.kind,
                                                        unit or (old.unit if old else ""), "calculator", code)
-                st.session_state["pr_last"] = list(res)
+                settings["output_metadata"] = {n: dict(kind=p.properties[n].kind, unit=p.properties[n].unit) for n in res}
+                property_history.record(p, "Python calculator", settings, res)
+                st.session_state[key("last")] = list(res)
                 st.rerun()
             except pp.CalcError as e:
+                property_history.record(p, "Python calculator", settings, [], status="Failed", message=str(e))
                 st.error(str(e))
-        if st.session_state.get("pr_last"):
-            last = [n for n in st.session_state.pop("pr_last") if n in p.properties]
+        if st.session_state.get(key("last")):
+            last = [n for n in st.session_state.pop(key("last")) if n in p.properties]
             st.success("Stored: " + ", ".join(last))
             st.dataframe(_table(p, g).query("Property in @last").round(4), hide_index=True)
         with st.expander("Variables and functions"):
@@ -367,6 +408,8 @@ def _stochastic(p, g):
             except gs.GeostatError as e:
                 st.warning(str(e))
 
+    from views import property_trends
+    property_trends.render(cfg, p, lambda field, opts=None: S.k("sx_trend_" + field, opts))
     with st.expander("3  Correlation and cut-offs", expanded=True):
         a, b, c = st.columns(3)
         cc = cfg["corr"]
@@ -413,13 +456,16 @@ def _stochastic(p, g):
         try:
             bar = st.progress(0.0)
             cnd = {k: p.properties[v].values for k, v in cfg.get("cond", {}).items() if v in p.properties and p.properties[v].values.shape == (g.nk, g.nj, g.ni)}
-            res = gs.simulate(g, cfg, progress=lambda f: bar.progress(min(float(f), 1.0)), cond=cnd or None, properties=p.properties)
+            res = gs.simulate(g, cfg, progress=lambda f: bar.progress(min(float(f), 1.0)), cond=cnd or None,
+                              properties=p.properties, surfaces=p.surfaces)
             for n, r in res.items():
                 p.properties[n] = pp.make_property(g, n, r["values"], r["kind"], r["unit"], "stochastic",
                                                    f"stochastic workflow by {cfg['domain']}" + (f" / {cfg['facies']}" if row_key == "facies_rows" else ""))
+            property_history.record(p, "Stochastic property modelling", cfg, res)
             st.session_state["sx_last"] = list(res)
             st.rerun()
         except gs.GeostatError as e:
+            property_history.record(p, "Stochastic property modelling", cfg, [], status="Failed", message=str(e))
             st.error(str(e))
     st.caption(f"About {est_mb:.0f} MB of arrays are created during the run.")
     last = [n for n in st.session_state.get("sx_last", []) if n in p.properties]
@@ -509,16 +555,20 @@ def _planes_regions(p, g):
         try:
             new = rg.plane_properties(g, planes, zu)
             p.properties.update(new)
+            property_history.record(p, "Plane properties", {"planes": planes, "depth_unit": zu}, new)
             st.success("Stored: " + ", ".join(new))
         except rg.RegionError as e:
+            property_history.record(p, "Plane properties", {"planes": planes, "depth_unit": zu}, [], status="Failed", message=str(e))
             st.error(str(e))
     ok_c = bool(p.volumetrics) and not vol.check_config(g, p.volumetrics)
     if c2.button("Create contact properties (OWC / GOC depth, height above, FLUID)", key=S.k("pl_cont"), disabled=not ok_c):
         try:
             new = rg.contact_properties(g, p.volumetrics, zu, p.properties)
             p.properties.update(new)
+            property_history.record(p, "Contact properties", {"volumetrics": p.volumetrics}, new)
             st.success("Stored: " + ", ".join(new))
         except rg.RegionError as e:
+            property_history.record(p, "Contact properties", {"volumetrics": p.volumetrics}, [], status="Failed", message=str(e))
             st.error(str(e))
     if not ok_c:
         st.caption("Contact properties need the contacts: set them on the Volumetrics page first.")
@@ -537,8 +587,10 @@ def _planes_regions(p, g):
         try:
             new = rg.region_segment(g, mode, fluid)
             p.properties.update(new)
+            property_history.record(p, "Fault-block region and segments", {"mode": mode, "volumetrics": p.volumetrics}, new)
             st.success(f"Stored FAULT_BLOCK, REGION ({int(g.block.max())} blocks) and SEGMENT ({len(new['SEGMENT'].legend)} segments).")
         except rg.RegionError as e:
+            property_history.record(p, "Fault-block region and segments", {"mode": mode}, [], status="Failed", message=str(e))
             st.error(str(e))
     for nm in ("REGION", "SEGMENT", "FLUID", "PLANE_REGION"):
         if nm in p.properties and p.properties[nm].values.shape == (g.nk, g.nj, g.ni):
@@ -597,11 +649,14 @@ def _well_logs(p, g):
         if st.button("Block wells", type="primary", key=S.k("blk_run")):
             arr, info = lg.block_wells(g, p.wells, p.logs, cv, disc, avg)
             if info["cells"] == 0:
+                property_history.record(p, "Block well logs", dict(curve=cv, discrete=disc, average=avg, output=name), [],
+                                        status="Failed", message="No log sample falls in an active cell.")
                 st.error("No log sample falls in an active cell - check that the wells lie inside the grid and the MD range overlaps the reservoir.")
             else:
                 pr = pp.make_property(g, name, arr, "discrete" if disc else "continuous", p.logs[info["wells"][0]]["units"].get(cv, ""), "blocked wells",
                                       f"{cv} blocked ({avg})")
                 p.properties[name] = pr
+                property_history.record(p, "Block well logs", dict(curve=cv, discrete=disc, average=avg, output=name, wells=info["wells"]), [name])
                 st.session_state["blk_last"] = dict(name=name, **info)
                 st.rerun()
         last = st.session_state.get("blk_last")
@@ -664,6 +719,7 @@ def _well_logs(p, g):
             vp = dict(vtype=vtk, major=maj, minor=mnr, vert=vrt, nugget=nug)
             est = gs.krige_property(g, p.properties[kn].values, vp, gs.rel_angle(az, g.angle), True, nmax, nsc, progress=lambda x: bar.progress(min(float(x), 1.0)))
             p.properties[out] = pp.make_property(g, out, est, "continuous", p.properties[kn].unit, "kriging", f"simple kriging of {kn}")
+            property_history.record(p, "Simple kriging", dict(input=kn, output=out, variogram=vp, azimuth=az, neighbours=nmax, normal_score=nsc), [out])
             st.success(f"Stored {out}. Simple kriging in the {'normal-score' if nsc else 'raw'} domain, per zone; cells farther than the range from any datum take the data mean "
                        "(kriging is smooth by nature - use the stochastic workflow for realistic variability).")
 
@@ -799,6 +855,7 @@ def _facies(p, g):
                         for k_ in [k_ for k_ in st.session_state if str(k_).startswith("fa_prop")]:
                             st.session_state.pop(k_)
                         st.rerun()
+    facies_trends.render(cfg, p, lambda field, opts=None: S.k("fa_" + field, opts))
     errs = fa.check_config(cfg, g)
     for e in errs:
         st.error(e)
@@ -808,11 +865,13 @@ def _facies(p, g):
         try:
             bar = st.progress(0.0)
             cnd = p.properties[cfg["cond"]].values if cfg.get("cond") in p.properties else None
-            arr = fa.simulate(g, cfg, cnd, progress=lambda f: bar.progress(min(float(f), 1.0)))
+            arr = fa.simulate(g, cfg, cnd, progress=lambda f: bar.progress(min(float(f), 1.0)), surfaces=p.surfaces)
             p.properties[fname] = pp.make_property(g, fname, arr, "discrete", "", "facies", f"facies model ({cfg['method']})", fa.legend(cfg))
+            property_history.record(p, "Facies model", dict(cfg, output=fname), [fname])
             st.session_state["fa_last"] = fname
             st.rerun()
         except fa.FaciesError as e:
+            property_history.record(p, "Facies model", dict(cfg, output=fname), [], status="Failed", message=str(e))
             st.error(str(e))
     last = st.session_state.get("fa_last")
     if last in p.properties and p.properties[last].values.shape == (g.nk, g.nj, g.ni):
@@ -852,6 +911,7 @@ def _facies(p, g):
                 res = fa.petrophysics(g, p.properties[sel].values, cfg)
                 for n, r in res.items():
                     p.properties[n] = pp.make_property(g, n, r["values"], r["kind"], r["unit"], "facies", f"from facies {sel}")
+                property_history.record(p, "Petrophysics from facies", dict(cfg, input_facies=sel), res)
                 st.success("Stored PORO, PERMX, PERMY, PERMZ, NTG (existing properties of the same names were replaced).")
         else:
             st.caption("Run the facies model first.")

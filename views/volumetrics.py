@@ -7,7 +7,8 @@ from core import props as pp
 from core import volumetrics as V
 from ui import state as S
 from ui import specs
-from ui.components import plotly_view
+from ui.components import plotly_view, viewer3d
+from ui.scene import Scene
 from ui.theme import banner, kpis, note
 
 
@@ -76,6 +77,52 @@ def _contact_extras(p, g, cfg, zu):
         t["yref"] = b.number_input("Tilt reference Y", value=float(t["yref"] or np.mean(Y)), key=S.k("vo_tyr"))
 
 
+def _fluid_view(p, g, cfg, res):
+    st.markdown("### In-place fluids - ternary 3D")
+    st.caption("Green = oil, red = free gas, blue = water. Colours blend by reservoir-condition fluid pore volume, "
+               "including mixed contact cells and water below OWC. Grey = no included net pore volume. "
+               "Solution gas remains part of the oil phase; STOIIP/GIIP reporting is unchanged.")
+    cells = res["cells"]
+    try:
+        colors = V.ternary_colors(cells["OIL_PV"], cells["GAS_PV"], cells["WATER_PV"])
+    except V.VolError as exc:
+        st.error(str(exc))
+        return
+    a, b, c = st.columns(3)
+    i0 = a.slider("Fluid view: first I", 0, max(g.ni - 1, 0), 0, key=S.k("vo_3i")) if g.ni > 1 else 0
+    j0 = b.slider("Fluid view: first J", 0, max(g.nj - 1, 0), 0, key=S.k("vo_3j")) if g.nj > 1 else 0
+    ve = c.slider("Fluid view: vertical exaggeration", 1.0, 20.0, 3.0, 0.5, key=S.k("vo_3ve"))
+    mesh = st.checkbox("Fluid view: show cell edges", value=False, key=S.k("vo_3mesh"))
+    layers = S.grid_view_layers(g, "vo_3")
+    included = np.isin(g.layer_zone, [i for i, z in enumerate(g.zones) if z.name in cfg["zones"]])
+    layers &= included
+    legend = dict(title="Fluid pore-volume mixture", items=[
+        dict(label="Oil", color="#00FF00"), dict(label="Gas", color="#FF0000"),
+        dict(label="Water", color="#0000FF"), dict(label="No net pore volume", color="#BEBEBE")])
+    sc = Scene((p.lattice.xori, p.lattice.yori))
+    try:
+        sc.grid(g, name="In-place fluids", prop="Zone", i0=i0, j0=j0, layer_mask=layers,
+                cell_colors=colors, color_legend=legend)
+        viewer3d(sc, key=S.k("vo_fluid3d"), height=720, ve=ve, mesh=mesh)
+    except ValueError as exc:
+        st.warning(str(exc))
+    if not layers.any():
+        st.warning("No included reservoir layers match the fluid view filters.")
+    with st.expander("Ternary colour key"):
+        fractions = np.array([(oil / 20, gas / 20, (20 - oil - gas) / 20)
+                              for oil in range(21) for gas in range(21 - oil)])
+        rgb = V.ternary_colors(*fractions.T)
+        plotly_view(dict(data=[dict(type="scatterternary", a=fractions[:, 0].tolist(),
+                                   b=fractions[:, 1].tolist(), c=fractions[:, 2].tolist(), mode="markers",
+                                   marker=dict(size=12, color=[f"rgb({r},{g},{b})" for r, g, b in rgb]),
+                                   hovertemplate="Oil: %{a:.0%}<br>Gas: %{b:.0%}<br>Water: %{c:.0%}<extra></extra>")],
+                         layout=specs.base_layout("Reservoir fluid pore-volume fractions", showlegend=False,
+                                                  ternary=dict(sum=1, aaxis=dict(title="Oil", color="#00B050"),
+                                                               baxis=dict(title="Gas", color="#FF0000"),
+                                                               caxis=dict(title="Water", color="#0000FF")))),
+                    key=S.k("vo_ternary_key"), height=360)
+
+
 def render():
     p = S.proj()
     g = p.grid
@@ -89,9 +136,11 @@ def render():
     t1, t2, t3, t4, t5 = st.tabs(["Setup", "Results", "Contact scan", "Uncertainty", "Realisations & store"])
 
     with t1:
+        from views import contact_settings
+        system = contact_settings.fluid_system(cfg["contacts"], lambda field, current: S.k("vo_" + field + "_" + current))
         c1, c2, c3 = st.columns(3)
-        cfg["contacts"]["owc"] = c1.number_input(f"OWC depth ({zu})", value=float(cfg["contacts"]["owc"]), step=5.0, key=S.k("vo_owc"))
-        use_goc = c2.checkbox("Gas cap (GOC)", value=cfg["contacts"]["goc"] is not None, key=S.k("vo_usegoc"))
+        cfg["contacts"]["owc"] = c1.number_input(f"{'GWC' if system == 'gas' else 'OWC'} depth ({zu})", value=float(cfg["contacts"]["owc"]), step=5.0, key=S.k("vo_owc"))
+        use_goc = system == "oil_gas" or (system == "auto" and c2.checkbox("Gas cap (GOC)", value=cfg["contacts"]["goc"] is not None, key=S.k("vo_usegoc")))
         if use_goc:
             dflt = cfg["contacts"]["goc"] if cfg["contacts"]["goc"] is not None else cfg["contacts"]["owc"] - 30.0
             cfg["contacts"]["goc"] = c3.number_input(f"GOC depth ({zu})", value=float(dflt), step=5.0, key=S.k("vo_goc"))
@@ -162,6 +211,7 @@ def render():
         if res is None:
             note("Fix the set-up first.", warn=True)
         else:
+            _fluid_view(p, g, cfg, res)
             so, uo = V.to_display(res["total"]["STOIIP"], "oil", disp)
             gg, ug = V.to_display(res["total"]["GIIP"], "gas", disp)
             grv = res["total"]["oil"]["GRV"] + res["total"]["gas"]["GRV"]
@@ -193,7 +243,7 @@ def render():
             vals = [V.to_display(r["STOIIP"], "oil", disp)[0] for r in res["by_zone"] if r["included"]]
             if names:
                 lay = specs.base_layout("STOIIP by zone", yaxis=dict(title=uo, gridcolor=specs.LINE), xaxis=dict(title=""))
-                plotly_view(dict(data=[dict(type="bar", x=names, y=vals, marker=dict(color=specs.PALETTE[0]))], layout=lay), key=S.k("vo_bar") + str(round(sum(vals), 3)), height=280)
+                plotly_view(dict(data=[dict(type="bar", x=names, y=vals, marker=dict(color="#00B050"))], layout=lay), key=S.k("vo_bar") + str(round(sum(vals), 3)), height=280)
             tbl = pd.DataFrame([{"Quantity": "GRV oil (10^6 m3)", "Value": res["total"]["oil"]["GRV"] / 1e6}, {"Quantity": "NRV oil (10^6 m3)", "Value": res["total"]["oil"]["NRV"] / 1e6},
                                 {"Quantity": "PV oil (10^6 m3)", "Value": res["total"]["oil"]["PV"] / 1e6}, {"Quantity": "HCPV oil (10^6 m3)", "Value": res["total"]["oil"]["HCPV"] / 1e6},
                                 {"Quantity": f"STOIIP ({uo})", "Value": so}, {"Quantity": f"GIIP free gas ({ug})", "Value": V.to_display(res["total"]["gas"]["GIIP_free"], "gas", disp)[0]},

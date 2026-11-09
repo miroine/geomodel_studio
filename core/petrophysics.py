@@ -5,6 +5,7 @@ import numpy as np
 
 from . import props as pp
 from . import volumetrics as vol
+from . import property_trends as trends
 
 DOMAINS = ["zone", "facies", "zone_facies"]
 
@@ -82,7 +83,7 @@ def parameter_arrays(grid, properties, mode: str, facies_name: str, rows: list[d
     return arrays
 
 
-def model_petrophysics(grid, properties, mode: str, facies_name: str, rows: list[dict]) -> dict:
+def model_petrophysics(grid, properties, mode: str, facies_name: str, rows: list[dict], trend_config=None, surfaces=None) -> dict:
     """Assign PORO, permeability and NTG constants per active domain."""
     fields = ["poro", "permx", "ntg", "kykx", "kvkh"]
     values = parameter_arrays(grid, properties, mode, facies_name, rows, fields)
@@ -93,6 +94,12 @@ def model_petrophysics(grid, properties, mode: str, facies_name: str, rows: list
     for key in ("permx", "kykx", "kvkh"):
         if (values[key][active] < 0).any():
             raise PetroError(f"{key} must be non-negative.")
+    try:
+        for name, field in (("PORO", "poro"), ("PERM", "permx"), ("NTG", "ntg")):
+            values[field] += trends.offset(grid, (trend_config or {}).get(name, {}), surfaces)
+            values[field] = np.clip(values[field], 0, np.inf if name == "PERM" else 1)
+    except trends.TrendError as exc:
+        raise PetroError(str(exc)) from exc
     with np.errstate(over="ignore"):
         outputs = dict(PORO=values["poro"], PERMX=values["permx"],
                        PERMY=values["permx"] * values["kykx"], PERMZ=values["permx"] * values["kvkh"],
@@ -101,7 +108,7 @@ def model_petrophysics(grid, properties, mode: str, facies_name: str, rows: list
            for value in outputs.values()):
         raise PetroError("Petrophysical parameters produce values outside the supported range.")
     return {name: pp.make_property(grid, name, value, unit="mD" if name.startswith("PERM") else "frac",
-                                   source="petrophysics", expr=f"constant assignment by {mode}")
+                                   source="petrophysics", expr=f"assignment by {mode}" + (" with spatial trends" if trend_config else ""))
             for name, value in outputs.items()}
 
 
@@ -129,7 +136,7 @@ def model_saturation(grid, properties, cfg: dict, contacts: dict) -> np.ndarray:
             raise PetroError("GOC must be finite where defined and shallower than OWC.")
         height = np.maximum(fwl - depth, 0.0)
         sw = vol.saturation_height(height, params["swirr"], params["entry"], params["lam"])
-        if cfg.get("gas_curve", False):
+        if cfg.get("gas_curve", False) and contacts["contacts"].get("fluid_system", "auto") not in ("gas", "oil"):
             gas_params = parameter_arrays(grid, properties, cfg["domain"], cfg.get("facies", ""), cfg["rows"],
                                           ["gas_swirr", "gas_entry", "gas_lam"])
             if ((gas_params["gas_swirr"][active] < 0) | (gas_params["gas_swirr"][active] > 1)).any():

@@ -11,6 +11,7 @@ Conventions
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import math
 import numpy as np
 from scipy import ndimage
 
@@ -81,6 +82,31 @@ class Geometry:
         ncol = int(round((xmax - xmin) / dx)) + 1
         nrow = int(round((ymax - ymin) / dy)) + 1
         return Geometry(xmin, ymin, dx, dy, ncol, nrow, 0.0)
+
+
+def surface_area_values(geom: Geometry):
+    """Return north-up bounds and spacing covering the entire surface lattice."""
+    values = (geom.xori, geom.yori, geom.xinc, geom.yinc, geom.rotation)
+    if not all(math.isfinite(v) for v in values) or geom.xinc <= 0 or geom.yinc <= 0:
+        raise ValueError("Surface coordinates and positive spacing must be finite.")
+    if geom.ncol < 2 or geom.nrow < 2:
+        raise ValueError("The surface must have at least two rows and two columns.")
+    a = math.radians(geom.rotation)
+    ux, uy = (geom.ncol - 1) * geom.xinc * math.cos(a), (geom.ncol - 1) * geom.xinc * math.sin(a)
+    vx, vy = -(geom.nrow - 1) * geom.yinc * math.sin(a), (geom.nrow - 1) * geom.yinc * math.cos(a)
+    xmin = geom.xori + min(0, ux) + min(0, vx)
+    xmax = geom.xori + max(0, ux) + max(0, vx)
+    ymin = geom.yori + min(0, uy) + min(0, vy)
+    ymax = geom.yori + max(0, uy) + max(0, vy)
+    width, height = xmax - xmin, ymax - ymin
+    if not all(math.isfinite(v) for v in (xmin, xmax, ymin, ymax)) or width <= 0 or height <= 0:
+        raise ValueError("The surface must have finite, non-zero X and Y extents.")
+    nx = max(1, math.ceil(width / geom.xinc))
+    ny = max(1, math.ceil(height / geom.yinc))
+    dx, dy = width / nx, height / ny
+    if dx < 1e-12 or dy < 1e-12:
+        raise ValueError("Surface spacing is too small for the model area controls.")
+    return xmin, xmax, ymin, ymax, dx, dy
 
 
 class Surface:

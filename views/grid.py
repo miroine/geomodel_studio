@@ -102,6 +102,11 @@ def render():
     g = p.grid
     banner("6 - 3D grid", (f"{g.ni} x {g.nj} x {g.nk} corner-point grid: {int(g.actnum.sum()):,} active cells in {int(g.block.max())} fault block(s)"
                            if g else "Grid the framework: vertical pillars, zone layering, stair-stepped faults"))
+    render_controls(p)
+    render_results(p)
+
+
+def render_controls(p, build_area=None):
     if p.structure is None or not p.zones:
         note("Run the structural model (page 4) and define zones (page 5) first.", warn=True)
         return
@@ -130,7 +135,11 @@ def render():
               f"max aspect {est['aspect_max']:.1f}")
     if est["aspect_max"] > 6:
         st.warning("Strongly elongated cells (aspect > 6) hurt simulator convergence - refine the coarse direction.")
-    if st.button("Build 3D grid", type="primary", disabled=est["cells"] > MAX_CELLS * 1.5):
+    button_area = build_area if build_area is not None else st
+    label = "Build / update 3D grid" if build_area is not None else "Build 3D grid"
+    if button_area.button(label, type="primary", disabled=est["cells"] > MAX_CELLS * 1.5,
+                          use_container_width=build_area is not None,
+                          help="Build or update the grid using the current zone, layering and grid settings."):
         p.grid_params = {**gp, **spec["store"]}
         built = None
         try:
@@ -147,6 +156,9 @@ def render():
                 st.rerun()
     for m in st.session_state.pop("grid_msgs", []):
         st.info(m)
+
+
+def render_results(p):
     g = p.grid
     if g is None:
         return

@@ -408,6 +408,8 @@ def recompute_stale(props: Dict[str, Property], g) -> List[str]:
                 msgs.append(f"{', '.join(res)} recomputed")
             except CalcError as e:
                 msgs.append(f"{n}: {e}")
+        elif pr.source == "polygon":
+            msgs.append(f"{n}: rerun the polygon assignment on the current grid")
         else:
             pr.geom_hash = h
             pr.stale = False

@@ -110,15 +110,19 @@ def _library(p):
 
 def _import(p):
     st.markdown("**XY text** (X Y per line; a blank line, a `>` line or a text line starts the next polygon - Petrel / RMS / generic export) "
-                "or **GeoJSON** (Polygon / MultiPolygon).")
+                "or **GeoJSON** (Polygon / MultiPolygon), or **RMS .POL / .rmspolygons** (X Y Z, "
+                "separated by `999 999 999`). Z values are ignored.")
+    st.caption("Import adds separate polygon objects; surfaces are only clipped when you explicitly add a clip.")
     fxp, _ = _file_units("poly", p, z_sign=False)
     up = st.file_uploader("Polygon files", accept_multiple_files=True, key=S.k("poly_up"))
     for f in up or []:
         with st.container(border=True):
             st.markdown(f"**{f.name}**")
             try:
-                found = pg.parse(f.getvalue(), default_name=f.name.rsplit(".", 1)[0])
-            except Exception as e:
+                ext = f.name.rsplit(".", 1)[-1].lower()
+                parser = pg.parse_rms_pol if ext in ("pol", "rmspolygons") else pg.parse
+                found = parser(f.getvalue(), default_name=f.name.rsplit(".", 1)[0])
+            except (ValueError, UnicodeError, KeyError, TypeError) as e:
                 st.error(f"Could not read: {e}")
                 continue
             st.caption(", ".join(f"{n} ({len(q.pts)} pts)" for n, q in found.items()))
@@ -133,7 +137,11 @@ def _import(p):
                         k += 1
                     polys[nm] = Polygon(nm, [[a * fxp, b * fxp] for a, b in q.pts])
                     first = first or nm
-                _apply_set(p, polys, first if asb else p.boundary)
+                previous_boundary = p.boundary
+                p.polygons = polys
+                p.boundary = first if asb else previous_boundary
+                if p.boundary != previous_boundary:
+                    p.invalidate("grid")
                 st.session_state["nonce_poly"] = st.session_state.get("nonce_poly", 0) + 1
                 st.success(f"Added {len(found)} polygon(s).")
     if p.polygons:
