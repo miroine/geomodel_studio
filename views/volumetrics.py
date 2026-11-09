@@ -93,21 +93,29 @@ def _fluid_view(p, g, cfg, res):
     j0 = b.slider("Fluid view: first J", 0, max(g.nj - 1, 0), 0, key=S.k("vo_3j")) if g.nj > 1 else 0
     ve = c.slider("Fluid view: vertical exaggeration", 1.0, 20.0, 3.0, 0.5, key=S.k("vo_3ve"))
     mesh = st.checkbox("Fluid view: show cell edges", value=False, key=S.k("vo_3mesh"))
+    hide = st.checkbox("Hide undefined cells (shale / no net pore volume, shown in grey)", value=False,
+                       key=S.k("vo_3hide"), help="Removes cells with zero oil, gas and water pore volume so only "
+                       "the reservoir fluid distribution is drawn.")
     layers = S.grid_view_layers(g, "vo_3")
     included = np.isin(g.layer_zone, [i for i, z in enumerate(g.zones) if z.name in cfg["zones"]])
     layers &= included
+    cell_mask = None
+    if hide:
+        total = np.asarray(cells["OIL_PV"], float) + np.asarray(cells["GAS_PV"], float) + np.asarray(cells["WATER_PV"], float)
+        cell_mask = total.reshape(g.actnum.shape) > 0
+        st.caption(f"Showing {int((cell_mask & g.actnum.astype(bool)).sum()):,} of {int(g.actnum.sum()):,} active cells.")
     legend = dict(title="Fluid pore-volume mixture", items=[
         dict(label="Oil", color="#00FF00"), dict(label="Gas", color="#FF0000"),
-        dict(label="Water", color="#0000FF"), dict(label="No net pore volume", color="#BEBEBE")])
+        dict(label="Water", color="#0000FF")] + ([] if hide else [dict(label="No net pore volume", color="#BEBEBE")]))
     sc = Scene((p.lattice.xori, p.lattice.yori))
     try:
         sc.grid(g, name="In-place fluids", prop="Zone", i0=i0, j0=j0, layer_mask=layers,
-                cell_colors=colors, color_legend=legend)
+                cell_colors=colors, color_legend=legend, cell_mask=cell_mask)
         viewer3d(sc, key=S.k("vo_fluid3d"), height=720, ve=ve, mesh=mesh)
     except ValueError as exc:
         st.warning(str(exc))
-    if not layers.any():
-        st.warning("No included reservoir layers match the fluid view filters.")
+    if not layers.any() or (cell_mask is not None and not (cell_mask & layers[:, None, None]).any()):
+        st.warning("No included reservoir cells match the fluid view filters.")
     with st.expander("Ternary colour key"):
         fractions = np.array([(oil / 20, gas / 20, (20 - oil - gas) / 20)
                               for oil in range(21) for gas in range(21 - oil)])

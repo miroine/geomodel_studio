@@ -211,7 +211,8 @@ class CPGrid:
 
     # ---- exterior faces for 3D display -------------------------------
     def exterior_faces(self, i0=0, j0=0, scalar: Optional[np.ndarray] = None, max_faces=120_000,
-                       layer_mask: Optional[np.ndarray] = None, return_cell_ids=False):
+                       layer_mask: Optional[np.ndarray] = None, return_cell_ids=False,
+                       cell_mask: Optional[np.ndarray] = None):
         """Outer skin; optionally append original C-order cell IDs, one per triangle."""
         act = self.actnum[:, j0:, i0:].astype(bool)
         if layer_mask is not None:
@@ -219,6 +220,11 @@ class CPGrid:
             if layer_mask.shape != (self.nk,):
                 raise ValueError(f"Layer visibility mask must have shape ({self.nk},).")
             act &= layer_mask[:, None, None]
+        if cell_mask is not None:
+            cell_mask = np.asarray(cell_mask, dtype=bool)
+            if cell_mask.shape != self.actnum.shape:
+                raise ValueError(f"Cell visibility mask must have shape {self.actnum.shape}.")
+            act &= cell_mask[:, j0:, i0:]
         K, J, I = act.shape
 
         def nb(a, axis, step):

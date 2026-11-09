@@ -94,6 +94,39 @@ _fluid_view(p, p.grid, cfg, V.compute(p.grid,cfg,{},1))
         self.assertTrue(any(w.label == "Filter grid view by" for w in app.selectbox))
         self.assertTrue(any("Green = oil" in w.value for w in app.caption))
 
+    def test_hide_undefined_cells_removes_grey_cells_from_mesh(self):
+        g, cfg, _ = self.result()
+        cfg["cut"]["phi"] = 0
+        g.actnum[:] = 1
+        result = V.compute(g, cfg, {}, 1)
+        cells = result["cells"]
+        cells["OIL_PV"][0, 0, 0] = cells["GAS_PV"][0, 0, 0] = cells["WATER_PV"][0, 0, 0] = 0
+        colors = V.ternary_colors(cells["OIL_PV"], cells["GAS_PV"], cells["WATER_PV"])
+        mask = (cells["OIL_PV"] + cells["GAS_PV"] + cells["WATER_PV"]) > 0
+        obj = Scene((0, 0)).grid(g, cell_colors=colors, cell_mask=mask)
+        ids = np.frombuffer(base64.b64decode(obj["cell_ids"]), dtype=np.uint32)
+        self.assertNotIn(0, ids)
+        self.assertFalse((colors.reshape(-1, 3)[ids] == 190).all(axis=1).any())
+        with self.assertRaises(ValueError):
+            g.exterior_faces(cell_mask=np.ones(3, bool))
+
+    def test_fluid_view_hide_checkbox(self):
+        from streamlit.testing.v1 import AppTest
+        app = AppTest.from_string("""
+import streamlit as st
+from core import volumetrics as V, project as pj
+from core.surface import Geometry
+from test_property_models import grid_fixture
+from views.volumetrics import _fluid_view
+p = pj.Project(lattice=Geometry(0,0,10,10,3,2), grid=grid_fixture())
+cfg = V.default_config(p.grid)
+_fluid_view(p, p.grid, cfg, V.compute(p.grid,cfg,{},1))
+""").run(timeout=30)
+        box = next(w for w in app.checkbox if w.label.startswith("Hide undefined cells"))
+        app = box.check().run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertTrue(any("active cells" in w.value for w in app.caption))
+
 
 if __name__ == "__main__":
     unittest.main()

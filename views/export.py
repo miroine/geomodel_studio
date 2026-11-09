@@ -83,7 +83,16 @@ def render():
                 return ff.faults_keywords(g, list(p.faults.values()), p.fault_mult) if wfaults else ""
             sig = (id(g0), fm_, wfaults, tuple(props), blocks, system, tuple((n, c.values.sum()) for n, c in custom.items() if n in props))
             st.markdown("**Eclipse GRDECL** - Eclipse, OPM Flow, INTERSECT, tNavigator, CMG Builder, Petrel, RMS")
-            _prepared("grdecl", sig, lambda: ex.grdecl_text(g, props, p.name, blocks, system=system, custom=custom, extra=fault_txt()), "GRDECL", "MODEL.GRDECL", "text/plain")
+            layout = st.radio("GRDECL layout", ["One merged file (grid + all properties)",
+                                                "Standalone files (grid + one file per property, zipped)"],
+                              horizontal=True, key=S.k("ex_grdecl_layout"),
+                              help="Standalone: MODEL_GRID.GRDECL (geometry, ACTNUM, faults), MODEL_<PROP>.GRDECL per "
+                                   "property and MODEL_INCLUDE.GRDECL that INCLUDEs them all.")
+            if layout.startswith("One"):
+                _prepared("grdecl", sig, lambda: ex.grdecl_text(g, props, p.name, blocks, system=system, custom=custom, extra=fault_txt()), "GRDECL", "MODEL.GRDECL", "text/plain")
+            else:
+                _prepared("grdecl_split", sig, lambda: ex.grdecl_zip(ex.grdecl_files(g, props, p.name, blocks, system=system, custom=custom, extra=fault_txt())),
+                          "GRDECL files", "MODEL_GRDECL.zip", "application/zip")
             st.markdown("**Eclipse binary: EGRID + INIT** (written natively, no extra libraries)")
             esig = (id(g0), tuple(props), blocks, system, tuple(aliased), tuple((n, c.values.sum()) for n, c in custom.items() if n in props))
 

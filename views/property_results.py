@@ -20,11 +20,31 @@ def _layers(p, prefix):
     return layers
 
 
+def _model_map(p):
+    """Top-of-model depth map (lattice, clipped to the boundary) used as the fence editor background."""
+    lat, st_, g = p.lattice, p.structure, p.grid
+    if lat is None or st_ is None or not st_.names:
+        return None
+    top = g.zones[0].top if g.zones and g.zones[0].top in st_.names else st_.names[0]
+    Z = np.array(st_.lattice_depths()[st_.names.index(top)], dtype=float)
+    if Z.shape != lat.shape:
+        return None
+    bp = p.boundary_poly()
+    if bp is not None:
+        from core import polygons as pg
+        X, Y = lat.coords()
+        Z[~pg.inside(X, Y, bp.pts)] = np.nan
+    if not np.isfinite(Z).any():
+        return None
+    return dict(x0=lat.xori, y0=lat.yori, dx=lat.xinc, dy=lat.yinc, ncol=lat.ncol, nrow=lat.nrow, z=Z,
+                zmin=float(np.nanmin(Z)), zmax=float(np.nanmax(Z)))
+
+
 def _draw_fences(p, prefix):
     g = p.grid
     x, y = g.pillar_xy()
     extent = [float(x.min()), float(x.max()), float(y.min()), float(y.max())]
-    result = map_editor("fences", key=S.k(prefix + "_editor"), height=460, extent=extent,
+    result = map_editor("fences", key=S.k(prefix + "_editor"), height=460, extent=extent, grid=_model_map(p),
                         polygons=[f.to_dict() for f in p.fences.values()],
                         wells=[dict(name=w.name, x=w.x, y=w.y) for w in p.wells.values()],
                         nonce_tag=st.session_state.get(S.k(prefix + "_revision"), 0))

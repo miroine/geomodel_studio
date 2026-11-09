@@ -248,6 +248,29 @@ property_results.average_maps(p)
         self.assertFalse(app.exception)
         self.assertTrue(any("at least one zone/layer" in info.value for info in app.info))
 
+    def test_fence_editor_background_shows_clipped_model_top(self):
+        from core.cpgrid import ZoneSpec, build_grid
+        from core.surface import Surface
+        from core.workflow import run_workflow
+        from views.property_results import _model_map
+        lat = Geometry(0, 0, 10, 10, 11, 11)
+        p = pj.Project(lattice=lat)
+        p.surfaces = {"Top map": Surface("Top map", lat, np.full(lat.shape, 1000.0))}
+        p.steps = [dict(type="surface", horizon="Top", surface="Top map"),
+                   dict(type="isochore", horizon="Base", ref="Top", thickness=50)]
+        p.structure = run_workflow(p.steps, p.surfaces, {}, None, lat)
+        p.zones = [ZoneSpec("Reservoir", "Top", "Base", nlayers=2)]
+        p.grid = build_grid(p.structure, p.zones, 10, 10, 0.1)
+        self.assertIsNone(_model_map(pj.Project(grid=p.grid)))
+        p.polygons["Box"] = Polygon("Box", [[0., 0.], [50., 0.], [50., 50.], [0., 50.]])
+        p.boundary = "Box"
+        m = _model_map(p)
+        self.assertEqual((m["ncol"], m["nrow"], m["x0"], m["dx"]), (11, 11, 0, 10))
+        z = np.asarray(m["z"]).reshape(11, 11)
+        self.assertEqual((m["zmin"], m["zmax"]), (1000.0, 1000.0))
+        self.assertTrue(np.isfinite(z[2, 2]))
+        self.assertTrue(np.isnan(z[9, 9]))
+
     def test_main_properties_page_exposes_all_named_modelling_selectors(self):
         app = AppTest.from_file(os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")).run(timeout=30)
         p = project()

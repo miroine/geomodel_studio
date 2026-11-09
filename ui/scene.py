@@ -325,10 +325,10 @@ class Scene:
         return self.add(dict(name=name, group=group, type="points", pos=b64(pos, np.float32), color=color, size=6), pos)
 
     def grid(self, grid, prop="Zone", i0=0, j0=0, group="3D grid", name="3D grid", opacity=1.0, max_faces=120_000, props=None,
-             layer_mask=None, display=None, cell_colors=None, color_legend=None):
+             layer_mask=None, display=None, cell_colors=None, color_legend=None, cell_mask=None):
         sc, legend = grid_property(grid, prop, props, display)
         V, T, S, ids = grid.exterior_faces(i0, j0, sc["values"], max_faces=max_faces,
-                                          layer_mask=layer_mask, return_cell_ids=True)
+                                          layer_mask=layer_mask, return_cell_ids=True, cell_mask=cell_mask)
         if len(V) == 0:
             return None
         vs = np.empty(len(V))

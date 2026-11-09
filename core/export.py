@@ -47,7 +47,9 @@ def _ints_rle(arr: np.ndarray, per_line=12) -> str:
 def grdecl_text(g: CPGrid, properties: Optional[List[str]] = None, title="GeoModel Studio grid",
                 include_fault_blocks=False, gridunit=True, system="METRIC", custom=None, extra: str = "") -> str:
     """Eclipse GRDECL: SPECGRID / COORD / ZCORN / ACTNUM (+ cell properties)."""
-    props = properties or []
+    props = list(properties or [])
+    if include_fault_blocks and "FLUXNUM" not in props:
+        props.append("FLUXNUM")
     custom = custom or {}
     out = io.StringIO()
     out.write(f"{BANNER}\n-- {title}\n")
@@ -64,25 +66,55 @@ def grdecl_text(g: CPGrid, properties: Optional[List[str]] = None, title="GeoMod
     out.write("ZCORN\n" + _floats(g.zc, 3, 8) + "\n/\n\n")
     out.write("ACTNUM\n" + _ints_rle(g.actnum) + "\n/\n\n")
     for p in props:
-        if p in custom:                                   # user property (calculator / manual) overrides the zone constants
-            c = custom[p]
-            if c.kind == "discrete":
-                out.write(f"{p}\n" + _ints_rle(np.nan_to_num(c.values, nan=0.0)) + "\n/\n\n")
-            else:
-                out.write(f"{p}\n" + _floats(np.nan_to_num(c.values, nan=0.0), 5, 8) + "\n/\n\n")
-        elif p in ("PORO", "NTG"):
-            out.write(f"{p}\n" + _floats(g.property_array(p), 4, 8) + "\n/\n\n")
-        elif p in ("PERMX", "PERMY", "PERMZ"):
-            out.write(f"{p}\n" + _floats(g.property_array(p), 3, 8) + "\n/\n\n")
-        elif p == "FIPNUM":
-            out.write("FIPNUM\n" + _ints_rle(g.zone_layer_array()) + "\n/\n\n")
-        elif p == "SATNUM":
-            out.write("SATNUM\n" + _ints_rle(g.zone_layer_array()) + "\n/\n\n")
-        elif p == "FLUXNUM" and include_fault_blocks:
-            out.write("FLUXNUM\n" + _ints_rle(g.block_array()) + "\n/\n\n")
+        out.write(property_keyword(g, p, custom, include_fault_blocks))
     if extra:
         out.write(extra)
     return out.getvalue()
+
+
+def property_keyword(g: CPGrid, p: str, custom=None, include_fault_blocks=False) -> str:
+    """One GRDECL cell-property keyword block ('' when the property cannot be written)."""
+    custom = custom or {}
+    if p in custom:                                   # user property (calculator / manual) overrides the zone constants
+        c = custom[p]
+        if c.kind == "discrete":
+            return f"{p}\n" + _ints_rle(np.nan_to_num(c.values, nan=0.0)) + "\n/\n\n"
+        return f"{p}\n" + _floats(np.nan_to_num(c.values, nan=0.0), 5, 8) + "\n/\n\n"
+    if p in ("PORO", "NTG"):
+        return f"{p}\n" + _floats(g.property_array(p), 4, 8) + "\n/\n\n"
+    if p in ("PERMX", "PERMY", "PERMZ"):
+        return f"{p}\n" + _floats(g.property_array(p), 3, 8) + "\n/\n\n"
+    if p in ("FIPNUM", "SATNUM"):
+        return f"{p}\n" + _ints_rle(g.zone_layer_array()) + "\n/\n\n"
+    if p == "FLUXNUM" and include_fault_blocks:
+        return "FLUXNUM\n" + _ints_rle(g.block_array()) + "\n/\n\n"
+    return ""
+
+
+def grdecl_files(g: CPGrid, properties: Optional[List[str]] = None, title="GeoModel Studio grid",
+                 include_fault_blocks=False, system="METRIC", custom=None, extra: str = "",
+                 stem="MODEL") -> Dict[str, str]:
+    """Standalone GRDECL files: geometry (+ faults), one file per property and an INCLUDE master deck."""
+    props = list(properties or [])
+    if include_fault_blocks and "FLUXNUM" not in props:
+        props.append("FLUXNUM")
+    files = {f"{stem}_GRID.GRDECL": grdecl_text(g, [], title, system=system, extra=extra)}
+    for p in props:
+        body = property_keyword(g, p, custom, include_fault_blocks)
+        if body:
+            files[f"{stem}_{p}.GRDECL"] = f"{BANNER}\n-- {title}: {p} ({g.ni} x {g.nj} x {g.nk})\n\n{body}"
+    master = [f"{BANNER}\n-- {title}: include deck\n"]
+    master += [f"INCLUDE\n '{name}' /\n" for name in files]
+    files[f"{stem}_INCLUDE.GRDECL"] = "\n".join(master) + "\n"
+    return files
+
+
+def grdecl_zip(files: Dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    return buf.getvalue()
 
 
 def parse_grdecl(text: str) -> Dict[str, np.ndarray]:

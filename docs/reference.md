@@ -8,7 +8,7 @@
 **Volumetrics > Results** includes a full-width **In-place fluids - ternary 3D** view: oil is green, free gas red and water blue.
 Cell colours blend by reservoir-condition pore-volume fractions, including saturation and partial contact intersections.
 Water includes connate water and water below OWC; solution gas stays in the oil phase. Standard-condition STOIIP/GIIP are not mixed into the colour weights.
-Only included reservoir zones are displayed; grey denotes zero net pore volume after rock/saturation cut-offs.
+Only included reservoir zones are displayed; grey denotes zero net pore volume after rock/saturation cut-offs (tick *Hide undefined cells* to remove them).
 Use I/J cuts, zone/layer filters and optional cell edges to inspect the interior; expand the triangular colour key to read mixtures.
 Existing volume reports and totals are unchanged.
 
@@ -458,7 +458,7 @@ Limits: volumetrics ignore the part of a cell below the OWC by linear interpolat
 **Fluid split.** FLUID is 1 gas (above the GOC), 2 oil (down to the OWC), 3 water (below), evaluated at the cell centre with the per-block contacts. The Analysis page now computes it from the Volumetrics contacts when it has not been stored, and splits by fluid, region, segment or any other discrete property with the legend names.
 
 **Exports** (page 10).
-- GRDECL with any property; REGION / SEGMENT can also be written as FIPNUM, EQLNUM, SATNUM or FLUXNUM.
+- GRDECL with any property, as one merged file or as standalone files (grid + one file per property + INCLUDE deck, zipped); REGION / SEGMENT can also be written as FIPNUM, EQLNUM, SATNUM or FLUXNUM.
 - **EGRID** and **INIT** are written natively (Eclipse binary big-endian records; INIT holds PORV, DEPTH, DX, DY, DZ and the selected properties on the active cells, names shortened to 8 characters).
 - **Hand-over package** (zip): GRDECL, EGRID, INIT, ROFF grid + properties when xtgeo is installed, horizons as IRAP binary, fault traces as RMS polylines, well paths, picks and a README.
 - **RESQML 2.0.1** (EPC + HDF5) through resqpy + h5py (listed in requirements.txt; the button explains what is missing when they are not installed).

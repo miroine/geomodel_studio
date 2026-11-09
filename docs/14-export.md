@@ -28,7 +28,11 @@ supported hand-off formats.
 3. Choose simulator unit system, configure optional region keywords
    (FIPNUM/EQLNUM/SATNUM/FLUXNUM), and decide whether to write
    FAULTS/MULTFLT data.
-4. Review estimated output size and warnings. Download generated files
+4. For GRDECL choose the layout: **One merged file** (grid + all
+   properties in `MODEL.GRDECL`) or **Standalone files** (zip with
+   `MODEL_GRID.GRDECL`, one `MODEL_<PROP>.GRDECL` per property and a
+   `MODEL_INCLUDE.GRDECL` deck that INCLUDEs them all).
+5. Review estimated output size and warnings. Download generated files
    through the browser.
 5. On **Surfaces, faults, tops**, select the requested object and format.
    Surface downloads

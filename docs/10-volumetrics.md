@@ -46,7 +46,8 @@ reports and stored cell outputs.
 7. Review **In-place fluids - ternary 3D** for pore-volume-weighted oil,
    free gas and water
    distribution; use I/J cuts, filters and optional cell edges to inspect
-   the interior.
+   the interior. Tick **Hide undefined cells** to remove grey cells
+   (shale / no net pore volume) from the view.
 8. Recalculate after changing contacts, saturation, porosity, NTG, fluid
    system or grid.
    Save the project to preserve settings and results.
